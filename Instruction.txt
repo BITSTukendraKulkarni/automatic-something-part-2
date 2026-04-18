@@ -1,0 +1,31 @@
+From the psadt_agent directory:
+
+
+cd "d:\SSE automation\psadt_agent"
+1. First-time setup:
+
+
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env
+# Then edit .env and add your GROQ_API_KEY
+2. Launch the UI:
+
+
+python run.py
+Opens at http://localhost:7860
+
+3. Alternative port:
+
+
+python run.py --port 8080
+4. Headless CLI (no UI):
+
+
+python run.py --cli --installer "C:\Downloads\MyApp.exe" --name "MyApp" --version "1.0"
+5. Run just the MCP server standalone (for testing tools):
+
+
+python mcp_server.py
+Make sure your .env has GROQ_API_KEY=gsk_... set before running — the agents will fail to initialize without it.
