@@ -1,0 +1,29 @@
+# PSADT Agentic AI — Python dependencies
+# Python 3.11+ required (Windows)
+
+# ── Orchestration ──────────────────────────────────────────────────────────
+crewai==0.80.0
+crewai-tools==0.17.0
+
+# ── LLM / Groq ────────────────────────────────────────────────────────────
+langchain-groq==0.2.4
+langchain==0.3.14
+langchain-core==0.3.29
+
+# ── MCP Server ────────────────────────────────────────────────────────────
+fastmcp==2.3.4
+
+# ── UI ────────────────────────────────────────────────────────────────────
+gradio==5.23.3
+
+# ── Env / Config ──────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+pydantic==2.10.6
+
+# ── HTTP (used internally by langchain/crewai) ────────────────────────────
+httpx==0.28.1
+requests==2.32.3
+
+# ── Utilities ─────────────────────────────────────────────────────────────
+colorama==0.4.6
+rich==13.9.4
