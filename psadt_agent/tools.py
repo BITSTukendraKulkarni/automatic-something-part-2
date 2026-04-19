@@ -6,8 +6,8 @@ Each tool calls the corresponding mcp_server.py function directly
 
 import json
 from pathlib import Path
-from typing import Optional
-from langchain_core.tools import StructuredTool
+from typing import Optional, Type
+from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
 # Import MCP tool functions directly
@@ -348,103 +348,120 @@ def _run_powershell(script: str, timeout_seconds: int = 120) -> str:
 
 
 # ---------------------------------------------------------------------------
-# StructuredTool instantiation
+# CrewAI BaseTool subclasses
 # ---------------------------------------------------------------------------
 
-get_installer_metadata_tool = StructuredTool.from_function(
-    func=_get_installer_metadata,
-    name="get_installer_metadata",
-    description="Extract metadata (name, version, vendor, type) from an EXE, MSI, or MSIX installer file.",
-    args_schema=InstallerPathInput,
-)
+class GetInstallerMetadataTool(BaseTool):
+    name: str = "get_installer_metadata"
+    description: str = "Extract metadata (name, version, vendor, type) from an EXE, MSI, or MSIX installer file."
+    args_schema: Type[BaseModel] = InstallerPathInput
+    def _run(self, installer_path: str) -> str:
+        return _get_installer_metadata(installer_path)
 
-search_silent_switches_tool = StructuredTool.from_function(
-    func=_search_silent_switches,
-    name="search_silent_switches",
-    description="Determine the correct silent installation switches for a given installer file.",
-    args_schema=SearchSwitchesInput,
-)
+class SearchSilentSwitchesTool(BaseTool):
+    name: str = "search_silent_switches"
+    description: str = "Determine the correct silent installation switches for a given installer file."
+    args_schema: Type[BaseModel] = SearchSwitchesInput
+    def _run(self, installer_path: str, app_name: str = "") -> str:
+        return _search_silent_switches(installer_path, app_name)
 
-analyze_dependencies_tool = StructuredTool.from_function(
-    func=_analyze_dependencies,
-    name="analyze_dependencies",
-    description="Analyze an installer for required runtime dependencies (e.g., .NET, VCRedist).",
-    args_schema=DependenciesInput,
-)
+class AnalyzeDependenciesTool(BaseTool):
+    name: str = "analyze_dependencies"
+    description: str = "Analyze an installer for required runtime dependencies (e.g., .NET, VCRedist)."
+    args_schema: Type[BaseModel] = DependenciesInput
+    def _run(self, installer_path: str, app_name: str, app_version: str = "") -> str:
+        return _analyze_dependencies(installer_path, app_name, app_version)
 
-read_psadt_template_tool = StructuredTool.from_function(
-    func=_read_psadt_template,
-    name="read_psadt_template",
-    description="Read and validate a PSADT template directory, returning the toolkit version and available functions.",
-    args_schema=TemplatePathInput,
-)
+class ReadPsadtTemplateTool(BaseTool):
+    name: str = "read_psadt_template"
+    description: str = "Read and validate a PSADT template directory, returning the toolkit version and available functions."
+    args_schema: Type[BaseModel] = TemplatePathInput
+    def _run(self, template_path: str = PSADT_TEMPLATE_PATH) -> str:
+        return _read_psadt_template(template_path)
 
-build_folder_structure_tool = StructuredTool.from_function(
-    func=_build_folder_structure,
-    name="build_folder_structure",
-    description="Create the PSADT package folder structure by copying the template and injecting the installer.",
-    args_schema=BuildFolderInput,
-)
+class BuildFolderStructureTool(BaseTool):
+    name: str = "build_folder_structure"
+    description: str = "Create the PSADT package folder structure by copying the template and injecting the installer."
+    args_schema: Type[BaseModel] = BuildFolderInput
+    def _run(self, spec_json: str, template_path: str = PSADT_TEMPLATE_PATH) -> str:
+        return _build_folder_structure(spec_json, template_path)
 
-get_package_history_tool = StructuredTool.from_function(
-    func=_get_package_history,
-    name="get_package_history",
-    description="Retrieve historical package records for an application to ensure consistency and detect version upgrades.",
-    args_schema=HistoryInput,
-)
+class GetPackageHistoryTool(BaseTool):
+    name: str = "get_package_history"
+    description: str = "Retrieve historical package records for an application to ensure consistency and detect version upgrades."
+    args_schema: Type[BaseModel] = HistoryInput
+    def _run(self, app_name: str) -> str:
+        return _get_package_history(app_name)
 
-generate_script_tool = StructuredTool.from_function(
-    func=_generate_script,
-    name="generate_deploy_script",
-    description="Generate and write a complete Deploy-Application.ps1 for the PSADT package.",
-    args_schema=GenerateScriptInput,
-)
+class GenerateScriptTool(BaseTool):
+    name: str = "generate_deploy_script"
+    description: str = "Generate and write a complete Deploy-Application.ps1 for the PSADT package."
+    args_schema: Type[BaseModel] = GenerateScriptInput
+    def _run(self, spec_json: str) -> str:
+        return _generate_script(spec_json)
 
-execute_install_test_tool = StructuredTool.from_function(
-    func=_execute_install_test,
-    name="execute_install_test",
-    description="Execute the PSADT Deploy-Application.ps1 in Install mode on the host or in Windows Sandbox.",
-    args_schema=ExecuteTestInput,
-)
+class ExecuteInstallTestTool(BaseTool):
+    name: str = "execute_install_test"
+    description: str = "Execute the PSADT Deploy-Application.ps1 in Install mode on the host or in Windows Sandbox."
+    args_schema: Type[BaseModel] = ExecuteTestInput
+    def _run(self, package_dir: str, deployment_type: str = "Install", test_mode: str = TEST_MODE) -> str:
+        return _execute_install_test(package_dir, deployment_type, test_mode)
 
-parse_logs_tool = StructuredTool.from_function(
-    func=_parse_logs,
-    name="parse_psadt_logs",
-    description="Parse PSADT/MSI logs from C:\\Windows\\Logs\\Software to determine install success or failure.",
-    args_schema=ParseLogsInput,
-)
+class ParseLogsTool(BaseTool):
+    name: str = "parse_psadt_logs"
+    description: str = "Parse PSADT/MSI logs from C:\\Windows\\Logs\\Software to determine install success or failure."
+    args_schema: Type[BaseModel] = ParseLogsInput
+    def _run(self, app_name: str = "", log_path: str = "") -> str:
+        return _parse_logs(app_name, log_path)
 
-verify_registry_tool = StructuredTool.from_function(
-    func=_verify_registry,
-    name="verify_registry_installation",
-    description="Search the Windows Uninstall registry keys to verify an application is installed.",
-    args_schema=VerifyRegistryInput,
-)
+class VerifyRegistryTool(BaseTool):
+    name: str = "verify_registry_installation"
+    description: str = "Search the Windows Uninstall registry keys to verify an application is installed."
+    args_schema: Type[BaseModel] = VerifyRegistryInput
+    def _run(self, app_name_fragment: str) -> str:
+        return _verify_registry(app_name_fragment)
 
-verify_file_tool = StructuredTool.from_function(
-    func=_verify_file,
-    name="verify_file_exists",
-    description="Verify that a specific file exists on the system (e.g., the app's main executable).",
-    args_schema=VerifyFileInput,
-)
+class VerifyFileTool(BaseTool):
+    name: str = "verify_file_exists"
+    description: str = "Verify that a specific file exists on the system (e.g., the app's main executable)."
+    args_schema: Type[BaseModel] = VerifyFileInput
+    def _run(self, file_path: str) -> str:
+        return _verify_file(file_path)
 
-verify_wmi_tool = StructuredTool.from_function(
-    func=_verify_wmi,
-    name="verify_wmi_installation",
-    description="Verify application installation via WMI Win32_Product class.",
-    args_schema=VerifyWmiInput,
-)
+class VerifyWmiTool(BaseTool):
+    name: str = "verify_wmi_installation"
+    description: str = "Verify application installation via WMI Win32_Product class."
+    args_schema: Type[BaseModel] = VerifyWmiInput
+    def _run(self, app_name_fragment: str) -> str:
+        return _verify_wmi(app_name_fragment)
 
-cleanup_test_install_tool = StructuredTool.from_function(
-    func=_cleanup_test_install,
-    name="cleanup_test_installation",
-    description="Uninstall the test application after a successful QA test to restore the system to its original state.",
-    args_schema=CleanupInput,
-)
+class CleanupTestInstallTool(BaseTool):
+    name: str = "cleanup_test_installation"
+    description: str = "Uninstall the test application after a successful QA test to restore the system to its original state."
+    args_schema: Type[BaseModel] = CleanupInput
+    def _run(self, app_name: str, product_code: str = "", uninstall_string: str = "") -> str:
+        return _cleanup_test_install(app_name, product_code, uninstall_string)
 
-run_powershell_tool = StructuredTool.from_function(
-    func=_run_powershell,
-    name="run_powershell",
-    description="Execute an arbitrary PowerShell script and return stdout, stderr, and exit code.",
-    args_schema=PowerShellInput,
-)
+class RunPowerShellTool(BaseTool):
+    name: str = "run_powershell"
+    description: str = "Execute an arbitrary PowerShell script and return stdout, stderr, and exit code."
+    args_schema: Type[BaseModel] = PowerShellInput
+    def _run(self, script: str, timeout_seconds: int = 120) -> str:
+        return _run_powershell(script, timeout_seconds)
+
+
+# Singleton instances imported by agents.py
+get_installer_metadata_tool = GetInstallerMetadataTool()
+search_silent_switches_tool = SearchSilentSwitchesTool()
+analyze_dependencies_tool = AnalyzeDependenciesTool()
+read_psadt_template_tool = ReadPsadtTemplateTool()
+build_folder_structure_tool = BuildFolderStructureTool()
+get_package_history_tool = GetPackageHistoryTool()
+generate_script_tool = GenerateScriptTool()
+execute_install_test_tool = ExecuteInstallTestTool()
+parse_logs_tool = ParseLogsTool()
+verify_registry_tool = VerifyRegistryTool()
+verify_file_tool = VerifyFileTool()
+verify_wmi_tool = VerifyWmiTool()
+cleanup_test_install_tool = CleanupTestInstallTool()
+run_powershell_tool = RunPowerShellTool()

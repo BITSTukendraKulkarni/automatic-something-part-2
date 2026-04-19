@@ -8,8 +8,8 @@ Agents:
   4. The QA Tester     — execution, log analysis, system verification, cleanup
 """
 
+import os
 from crewai import Agent
-from langchain_groq import ChatGroq
 
 from config import GROQ_API_KEY, GROQ_MODEL
 from tools import (
@@ -32,13 +32,9 @@ from tools import (
 # ---------------------------------------------------------------------------
 # Shared LLM
 # ---------------------------------------------------------------------------
-def _make_llm() -> ChatGroq:
-    return ChatGroq(
-        api_key=GROQ_API_KEY,
-        model_name=GROQ_MODEL,
-        temperature=0.1,
-        max_tokens=4096,
-    )
+def _make_llm() -> str:
+    os.environ.setdefault("GROQ_API_KEY", GROQ_API_KEY)
+    return f"groq/{GROQ_MODEL}"
 
 
 # ---------------------------------------------------------------------------
