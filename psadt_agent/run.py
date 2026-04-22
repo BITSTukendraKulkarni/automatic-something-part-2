@@ -45,11 +45,13 @@ def ui_mode(port: int):
     """Launch the Gradio UI."""
     from ui import build_ui
     ui = build_ui()
+    from ui import UI_THEME
     ui.launch(
         server_name="0.0.0.0",
         server_port=port,
         share=False,
         show_error=True,
+        theme=UI_THEME,
     )
 
 

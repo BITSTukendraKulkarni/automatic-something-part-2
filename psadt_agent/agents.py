@@ -9,9 +9,38 @@ Agents:
 """
 
 import os
-from crewai import Agent
+import re
+import time
+import functools
+import litellm
+from crewai import Agent, LLM
 
-from config import GROQ_API_KEY, GROQ_MODEL
+from config import GROQ_API_KEY, GROQ_MODEL, GROQ_MAX_TOKENS
+
+# ---------------------------------------------------------------------------
+# Patch litellm.completion to auto-retry on RateLimitError.
+# litellm's built-in max_retries does NOT cover 429s — it only covers
+# network errors. This wrapper reads the "try again in Xs" from Groq's
+# error message and sleeps exactly that long before retrying.
+# ---------------------------------------------------------------------------
+_original_completion = litellm.completion
+
+@functools.wraps(_original_completion)
+def _completion_with_rate_limit_retry(*args, **kwargs):
+    max_attempts = 8
+    for attempt in range(max_attempts):
+        try:
+            return _original_completion(*args, **kwargs)
+        except litellm.RateLimitError as e:
+            if attempt == max_attempts - 1:
+                raise
+            msg = str(e)
+            match = re.search(r"try again in ([0-9.]+)s", msg)
+            wait = float(match.group(1)) + 2.0 if match else 30.0
+            print(f"[rate-limit] 429 hit — sleeping {wait:.1f}s (attempt {attempt + 1}/{max_attempts})")
+            time.sleep(wait)
+
+litellm.completion = _completion_with_rate_limit_retry
 from tools import (
     get_installer_metadata_tool,
     search_silent_switches_tool,
@@ -32,9 +61,21 @@ from tools import (
 # ---------------------------------------------------------------------------
 # Shared LLM
 # ---------------------------------------------------------------------------
-def _make_llm() -> str:
-    os.environ.setdefault("GROQ_API_KEY", GROQ_API_KEY)
-    return f"groq/{GROQ_MODEL}"
+def _make_llm() -> LLM:
+    if not GROQ_API_KEY:
+        raise ValueError(
+            "GROQ_API_KEY is not set. "
+            "Copy .env.example to .env and add your key from https://console.groq.com"
+        )
+    os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+    return LLM(
+        model=f"groq/{GROQ_MODEL}",
+        api_key=GROQ_API_KEY,
+        max_tokens=GROQ_MAX_TOKENS,
+        temperature=0.0,
+        max_retries=6,
+        timeout=120,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +103,7 @@ def make_researcher() -> Agent:
         llm=_make_llm(),
         verbose=True,
         allow_delegation=False,
-        max_iter=8,
+        max_iter=4,
     )
 
 
@@ -79,9 +120,8 @@ def make_architect() -> Agent:
         ),
         backstory=(
             "You have architected hundreds of enterprise Windows deployment packages. "
-            "You enforce PSADT conventions strictly: correct folder names, correct toolkit version imports, "
-            "proper AppDeployToolkitMain.ps1 initialization. You review history to detect regressions "
-            "and to reuse proven patterns."
+            "You enforce PSADT v4 conventions strictly: correct folder names, PSAppDeployToolkit module import, "
+            "proper Open-ADTSession initialization. You review history to detect regressions and reuse proven patterns."
         ),
         tools=[
             read_psadt_template_tool,
@@ -91,7 +131,7 @@ def make_architect() -> Agent:
         llm=_make_llm(),
         verbose=True,
         allow_delegation=False,
-        max_iter=6,
+        max_iter=4,
     )
 
 
@@ -102,7 +142,7 @@ def make_scripter() -> Agent:
     return Agent(
         role="PSADT Script Engineer",
         goal=(
-            "Generate a complete, production-ready Deploy-Application.ps1 that: "
+            "Generate a complete, production-ready Invoke-AppDeployToolkit.ps1 (PSADT v4) that: "
             "runs silently for all users, suppresses all reboots, "
             "cleans up any previous versions before installing, "
             "and implements separate Pre-Installation, Installation, and Post-Installation phases. "
@@ -122,7 +162,7 @@ def make_scripter() -> Agent:
         llm=_make_llm(),
         verbose=True,
         allow_delegation=False,
-        max_iter=10,
+        max_iter=5,
     )
 
 
@@ -158,5 +198,5 @@ def make_qa_tester() -> Agent:
         llm=_make_llm(),
         verbose=True,
         allow_delegation=False,
-        max_iter=12,
+        max_iter=5,
     )

@@ -1,7 +1,33 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/Scripts/pip show *)"
+      "Bash(.venv/Scripts/pip show *)",
+      "Bash(venv/Scripts/pip install *)",
+      "Bash(venv/Scripts/python -c \"import gradio; print\\(gradio.__version__\\)\")",
+      "Bash(venv/Scripts/python -c \"from gradio.components.code import Code; import inspect; src=inspect.getsource\\(Code.__init__\\); import re; m=re.search\\(r'LANGUAGES\\\\s*=\\\\s*\\\\[\\([^\\\\]]+\\)\\\\]', src\\); print\\(m.group\\(\\) if m else 'not found'\\)\")",
+      "Bash(venv/Scripts/python -c \"from gradio.components.code import LANGUAGES; print\\(LANGUAGES\\)\")",
+      "Bash(venv/Scripts/python -c \"import gradio.components.code as c; print\\(dir\\(c\\)\\)\")",
+      "Bash(venv/Scripts/python -c \"import gradio as gr; print\\(gr.Code.languages\\)\")",
+      "Bash(venv/Scripts/pip show *)",
+      "Bash(venv/Scripts/python -c ' *)",
+      "Bash(venv/Scripts/python -c \"from crewai import LLM; print\\('LLM import OK'\\)\")",
+      "Bash(venv/Scripts/python.exe -c ' *)",
+      "Bash(reg query *)",
+      "Bash(cmd /c \"reg query HKCU\\\\Environment /v GROQ_API_KEY 2>&1\")",
+      "Bash(cmd /c \"reg query \\\\\"HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Session Manager\\\\Environment\\\\\" /v GROQ_API_KEY 2>&1\")",
+      "Bash(cmd /c \"reg query HKCU\\\\Environment 2>&1 | findstr /i GROQ\")",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:graphify.net)",
+      "WebFetch(domain:clskillshub.com)",
+      "Bash(graphify --version)",
+      "Bash(graphify --help)",
+      "Bash(graphify update *)",
+      "Bash(venv/Scripts/python.exe -c \"import litellm; print\\(litellm.__version__\\)\")",
+      "Bash(venv/Scripts/python.exe -c \"from litellm import completion; import inspect; src = inspect.getsource\\(completion\\); print\\('RateLimitError' in src, 'retry' in src.lower\\(\\)\\)\")",
+      "Bash(venv/Scripts/python.exe -c \"import agents; import litellm; print\\('patched:', litellm.completion.__name__\\)\")",
+      "Bash(venv/Scripts/python.exe -c \"import psadt_template; print\\('OK'\\)\")",
+      "Bash(venv/Scripts/python.exe test_verification.py)"
     ]
   }
 }

@@ -13,27 +13,28 @@ load_dotenv()
 # LLM / API
 # ---------------------------------------------------------------------------
 GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MAX_TOKENS: int = int(os.getenv("GROQ_MAX_TOKENS", "4096"))
 GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).parent
-PACKAGES_DIR = BASE_DIR / "packages"
+PACKAGES_DIR = Path(r"C:\Temp\Packages")
 LOGS_DIR = BASE_DIR / "logs"
 TEMPLATES_DIR = BASE_DIR / "templates"
 PSADT_LOG_DIR = Path(r"C:\Windows\Logs\Software")
 
-PACKAGES_DIR.mkdir(exist_ok=True)
+PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
 TEMPLATES_DIR.mkdir(exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # PSADT Defaults
 # ---------------------------------------------------------------------------
-PSADT_TEMPLATE_PATH: str = os.getenv("PSADT_TEMPLATE_PATH", str(TEMPLATES_DIR / "PSAppDeployToolkit"))
-PSADT_VERSION: str = os.getenv("PSADT_VERSION", "3.10.2")
+PSADT_TEMPLATE_PATH: str = os.getenv("PSADT_TEMPLATE_PATH", r"C:\Users\Skynet\Desktop\New folder\PSAppDeployToolkit_Template_v4")
+PSADT_VERSION: str = os.getenv("PSADT_VERSION", "4.1.8")
 
 # ---------------------------------------------------------------------------
 # Human-in-the-Loop (HITL)

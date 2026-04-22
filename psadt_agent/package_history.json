@@ -1,0 +1,222 @@
+{
+  "7 zip 1.0": [
+    {
+      "app_name": "7 zip 1.0",
+      "app_version": "2.60",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "D:\\SSE automation\\psadt_agent\\templates\\PSAppDeployToolkit",
+      "script_path": "D:\\SSE automation\\psadt_agent\\templates\\PSAppDeployToolkit\\Deploy-Application.ps1",
+      "psadt_version": "3.10.2",
+      "qa_result": "FAIL",
+      "qa_exit_code": "3",
+      "validation": {
+        "registry": "NOT_INSTALLED",
+        "wmi": "NOT_INSTALLED"
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-20T09:15:35.019876"
+    }
+  ],
+  "7-Zip": [
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Users\\Skynet\\Downloads\\7z2600-x64.msi",
+      "script_path": "C:\\Users\\Skynet\\Downloads\\Deploy-Application.ps1",
+      "psadt_version": "3.10.2",
+      "qa_result": "FAIL",
+      "qa_exit_code": "2",
+      "validation": {
+        "registry": "No registry entry found",
+        "wmi": "No installation found"
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-21T11:48:40.039835"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260421_130948",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260421_130948\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1,
+      "validation": {
+        "registry": "No registry entry found for '7-Zip'",
+        "wmi": "No WMI entry found for '7-Zip'"
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-21T13:17:51.432195"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_054654",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_054654\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1,
+      "validation": {
+        "registry": "No matches",
+        "wmi": "Not installed"
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-22T05:49:20.929501"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_064836",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_064836\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1,
+      "validation": {
+        "registry": "No registry entry found for '7-Zip'",
+        "wmi": "No WMI entry found for '7-Zip'",
+        "get_package": "No package found for '7-Zip'"
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-22T06:50:53.709554"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_071101",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_071101\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": null,
+      "validation": {
+        "registry": {
+          "success": true,
+          "matches": [],
+          "count": 0
+        },
+        "wmi": {
+          "success": true,
+          "installed": false,
+          "matches": []
+        }
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-22T07:13:05.276013"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_074039",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_074039\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1,
+      "validation": {
+        "source": "None",
+        "installed": false
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-22T07:42:25.977352"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_092006",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_092006\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "PASS",
+      "qa_exit_code": null,
+      "validation": {
+        "source": "Get-Package",
+        "installed": true
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-22T09:21:58.192094"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_094027",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_094027\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1,
+      "validation": {
+        "installed": false,
+        "source": "all_checked",
+        "note": "Not found in Win32_Product, Get-Package, or registry for fragment: '7-Zip'"
+      },
+      "cleanup_completed": true,
+      "timestamp": "2026-04-22T09:42:16.755394"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_094524",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260422_094524\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "PASS",
+      "qa_exit_code": null,
+      "validation": {
+        "source": "registry",
+        "installed": true
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-22T09:47:05.194775"
+    }
+  ],
+  "VLC": [
+    {
+      "app_name": "VLC",
+      "app_version": "3.0.23",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\VLC_3.0.23_20260422_112426",
+      "script_path": "C:\\Temp\\Packages\\VLC_3.0.23_20260422_112426\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "PASS",
+      "qa_exit_code": null,
+      "validation": {
+        "source": "Get-Package",
+        "installed": true
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-22T11:26:35.526377"
+    },
+    {
+      "app_name": "VLC",
+      "app_version": "3.0.23",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\VLC_3.0.23_20260422_114324",
+      "script_path": "C:\\Temp\\Packages\\VLC_3.0.23_20260422_114324\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "PASS",
+      "qa_exit_code": null,
+      "validation": {
+        "source": "Get-Package",
+        "installed": true
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-22T11:45:16.239970"
+    }
+  ]
+}

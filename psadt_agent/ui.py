@@ -50,35 +50,71 @@ def _render_qa_report(report: dict) -> str:
     if not report:
         return "No test report available yet."
 
-    overall = report.get("overall_result", "UNKNOWN")
+    # Normalise overall_result — LLM may return mixed case or embed it in text
+    raw_overall = str(report.get("overall_result", "")).upper()
+    overall = "PASS" if "PASS" in raw_overall else "FAIL"
+
+    # Also infer from exit code if LLM didn't set it clearly
+    exit_code = report.get("install_exit_code")
+    if exit_code is None:
+        exit_code = report.get("exit_code")
+    try:
+        exit_code_int = int(exit_code) if exit_code is not None else -1
+    except (ValueError, TypeError):
+        exit_code_int = -1
+    if exit_code_int in (0, 3010) and "PASS" not in raw_overall and "FAIL" not in raw_overall:
+        overall = "PASS"
+
     icon = "✅ PASS" if overall == "PASS" else "❌ FAIL"
+    exit_meaning = report.get("exit_code_meaning") or explain_exit_code(exit_code_int)
 
     lines = [
         f"## {icon}",
         "",
-        f"**Install Exit Code:** `{report.get('install_exit_code', 'N/A')}` — {report.get('exit_code_meaning', '')}",
+        f"**Install Exit Code:** `{exit_code}` — {exit_meaning}",
         "",
         "### Log Analysis",
     ]
-    log_a = report.get("log_analysis", {})
-    lines.append(f"- Final Status: `{log_a.get('final_status', 'N/A')}`")
-    for err in log_a.get("error_lines", [])[:5]:
-        lines.append(f"  - ⚠️ `{err}`")
+    log_a = report.get("log_analysis") or {}
+    if isinstance(log_a, str):
+        lines.append(f"- {log_a}")
+    else:
+        lines.append(f"- Final Status: `{log_a.get('final_status', 'N/A')}`")
+        for err in (log_a.get("error_lines") or [])[:5]:
+            lines.append(f"  - ⚠️ `{err}`")
 
     lines += ["", "### Validation"]
-    val = report.get("validation", {})
-    for check, v in val.items():
-        status = "✅" if v.get("pass") else "❌"
-        lines.append(f"- {status} **{check.title()}**: {v.get('details', '')}")
+    val = report.get("validation") or {}
+    if isinstance(val, str):
+        lines.append(f"- {val}")
+    elif isinstance(val, dict):
+        for check, v in val.items():
+            if isinstance(v, dict):
+                status = "✅" if v.get("pass") or v.get("installed") else "❌"
+                detail = v.get("details") or v.get("matches") or v.get("installed", "")
+            else:
+                status = "✅" if v else "❌"
+                detail = str(v)
+            lines.append(f"- {status} **{check.replace('_', ' ').title()}**: {detail}")
+    if not val:
+        lines.append("- Registry / WMI checks not recorded by agent.")
 
     lines += ["", "### Post-Test Cleanup"]
-    cleanup = report.get("cleanup", {})
-    if cleanup.get("completed"):
-        lines.append("✅ Cleanup completed — system restored to original state.")
+    cleanup = report.get("cleanup") or {}
+    if isinstance(cleanup, str):
+        lines.append(f"- {cleanup}")
+    elif isinstance(cleanup, dict):
+        completed = cleanup.get("completed") or cleanup.get("success") or (cleanup.get("cleanup_exit_code") == 0)
+        if completed:
+            lines.append("✅ Cleanup completed — system restored to original state.")
+        else:
+            lines.append("❌ Cleanup incomplete or not attempted.")
+            if cleanup.get("still_installed"):
+                lines.append("  > ⚠️ Application may still be installed on this system.")
+            if cleanup.get("error"):
+                lines.append(f"  > Error: {cleanup['error']}")
     else:
-        lines.append("❌ Cleanup incomplete or not attempted.")
-        if cleanup.get("still_installed"):
-            lines.append("  > ⚠️ Application may still be installed on this system.")
+        lines.append("- Cleanup status not recorded by agent.")
 
     if report.get("failure_diagnosis"):
         lines += ["", "### Failure Diagnosis", f"> {report['failure_diagnosis']}"]
@@ -197,6 +233,37 @@ def get_full_result_json() -> str:
     return json.dumps(runner.result, indent=2, default=str)
 
 
+def get_generated_script() -> tuple[str, str]:
+    """Return the script content and its path from the last workflow run."""
+    if not runner.result:
+        return "No workflow result yet. Run the workflow first.", ""
+    script_path = (
+        runner.result.get("scripting", {}).get("script_path")
+        or runner.result.get("package_record", {}).get("script_path")
+    )
+    if not script_path:
+        return "Script path not recorded in workflow result.", ""
+    p = Path(script_path)
+    if not p.exists():
+        return f"Script file not found on disk: {script_path}", script_path
+    try:
+        content = p.read_text(encoding="utf-8")
+        return content, script_path
+    except Exception as e:
+        return f"Error reading script: {e}", script_path
+
+
+def browse_script_file(script_path: str) -> str:
+    """Read and return a Deploy-Application.ps1 from a user-supplied path."""
+    p = Path(script_path.strip())
+    if not p.exists():
+        return f"File not found: {script_path}"
+    try:
+        return p.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+
 def load_history_ui(app_name: str) -> str:
     return _render_history(app_name)
 
@@ -243,15 +310,16 @@ def search_registry_ui(app_fragment: str) -> str:
 # Gradio layout
 # ---------------------------------------------------------------------------
 
-def build_ui() -> gr.Blocks:
-    theme = gr.themes.Soft(
-        primary_hue="indigo",
-        secondary_hue="slate",
-        neutral_hue="gray",
-        font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
-    )
+UI_THEME = gr.themes.Soft(
+    primary_hue="indigo",
+    secondary_hue="slate",
+    neutral_hue="gray",
+    font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
+)
 
-    with gr.Blocks(title="PSADT Agentic AI", theme=theme) as app:
+
+def build_ui() -> gr.Blocks:
+    with gr.Blocks(title="PSADT Agentic AI") as app:
 
         gr.Markdown(
             """
@@ -421,7 +489,45 @@ Rejecting a gate will abort the workflow at that phase.
                 )
 
             # ----------------------------------------------------------------
-            # Tab 5 — Package History
+            # Tab 5 — Generated Script Viewer
+            # ----------------------------------------------------------------
+            with gr.Tab("📝 Generated Script"):
+                gr.Markdown("### View the Deploy-Application.ps1 generated by the last workflow run")
+                with gr.Row():
+                    load_script_btn = gr.Button("📄 Load from Last Run", variant="primary")
+                    script_path_display = gr.Textbox(
+                        label="Script Path", interactive=False, placeholder="Path will appear after workflow completes"
+                    )
+                with gr.Row():
+                    manual_path_input = gr.Textbox(
+                        label="Or enter path manually",
+                        placeholder=r"D:\SSE automation\psadt_agent\packages\MyApp_1.0_...\Deploy-Application.ps1",
+                    )
+                    browse_btn = gr.Button("Open", variant="secondary")
+
+                script_code_display = gr.Code(
+                    label="Deploy-Application.ps1",
+                    language="shell",
+                    lines=50,
+                    interactive=False,
+                )
+
+                def _load_script_from_run():
+                    content, path = get_generated_script()
+                    return content, path
+
+                load_script_btn.click(
+                    fn=_load_script_from_run,
+                    outputs=[script_code_display, script_path_display],
+                )
+                browse_btn.click(
+                    fn=browse_script_file,
+                    inputs=[manual_path_input],
+                    outputs=[script_code_display],
+                )
+
+            # ----------------------------------------------------------------
+            # Tab 6 — Package History
             # ----------------------------------------------------------------
             with gr.Tab("📚 Package History"):
                 gr.Markdown("### Browse previously built packages")
@@ -470,4 +576,5 @@ if __name__ == "__main__":
         server_port=port,
         share=False,
         show_error=True,
+        theme=UI_THEME,
     )

@@ -14,6 +14,7 @@ Set HITL_BYPASS=true in .env to skip gates.
 
 import json
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -32,6 +33,7 @@ from utils import (
 )
 from config import HITL_ENABLED, TEST_MODE, PSADT_TEMPLATE_PATH
 from psadt_template import PackageSpec
+from terminal_prompt import ask_terminal_permission
 
 log = get_logger("psadt-crew")
 
@@ -100,7 +102,10 @@ class PSADTCrew:
 
         try:
             # ---- Phase 1: Research ----------------------------------------
-            if not self._gate("Research", "Begin installer analysis and switch discovery?"):
+            p1_desc = (f"Installer: {self.installer_path} | App: {self.app_name} {self.app_version}\n"
+                       "1. Call get_installer_metadata. 2. Call search_silent_switches. 3. Call analyze_dependencies.\n"
+                       "Output compact JSON: app_name, app_version, app_vendor, installer_type, silent_switches, architecture, dependencies, notes.")
+            if not self._gate("Research", "Begin installer analysis and switch discovery?", task_description=p1_desc):
                 return self._aborted("Research")
 
             self._set_phase("Research")
@@ -108,28 +113,40 @@ class PSADTCrew:
             self._phase_results["research"] = research_result
 
             # ---- Phase 2: Architecture ------------------------------------
-            context_str = json.dumps(research_result, indent=2)[:500]
-            if not self._gate("Architecture", f"Research complete:\n{context_str}\n\nProceed to build folder structure?"):
+            context_str = json.dumps(research_result)[:300]
+            p2_desc = (f"Research: {context_str}\nTemplate: {self.template_path} | Installer: {self.installer_path}\n"
+                       "1. Call read_psadt_template. 2. Call get_package_history. 3. Call build_folder_structure.\n"
+                       "Output compact JSON: psadt_version, package_dir, spec_json.")
+            if not self._gate("Architecture", f"Research complete. Proceed to build folder structure?", task_description=p2_desc):
                 return self._aborted("Architecture")
 
             self._set_phase("Architecture")
+            time.sleep(20)
             arch_result = self._run_phase_2(research_result)
             self._phase_results["architecture"] = arch_result
 
             # ---- Phase 3: Scripting ---------------------------------------
-            if not self._gate("Scripting", f"Architecture complete. Package dir: {arch_result.get('package_dir','?')}\n\nProceed to generate Deploy-Application.ps1?"):
+            p3_desc = (f"Package dir: {arch_result.get('package_dir','?')}\n"
+                       "1. Extract spec_json. 2. Call generate_deploy_script.\n"
+                       "Output compact JSON: script_path, package_dir, installer_type, silent_switches_used, script_preview.")
+            if not self._gate("Scripting", f"Architecture complete. Package dir: {arch_result.get('package_dir','?')}", task_description=p3_desc):
                 return self._aborted("Scripting")
 
             self._set_phase("Scripting")
+            time.sleep(20)
             script_result = self._run_phase_3(arch_result)
             self._phase_results["scripting"] = script_result
 
             # ---- Phase 4: QA Testing --------------------------------------
-            script_preview = script_result.get("script_preview", "")[:300]
-            if not self._gate("QA Testing", f"Script generated at:\n{script_result.get('script_path','?')}\n\nPreview:\n{script_preview}\n\nProceed to test on {self.test_mode}?"):
+            p4_desc = (f"Script: {script_result.get('script_path','?')} | Mode: {self.test_mode}\n"
+                       "1. execute_install_test. 2. parse_psadt_logs. 3. verify_registry. 4. verify_wmi. 5. cleanup.\n"
+                       "Output compact JSON: overall_result, install_exit_code, log_analysis, validation, cleanup.")
+            script_preview = script_result.get("script_preview", "")[:200]
+            if not self._gate("QA Testing", f"Script at {script_result.get('script_path','?')}\n{script_preview}", task_description=p4_desc):
                 return self._aborted("QA Testing")
 
             self._set_phase("QA Testing")
+            time.sleep(20)
             qa_result = self._run_phase_4(script_result, research_result)
             self._phase_results["qa"] = qa_result
 
@@ -165,9 +182,14 @@ class PSADTCrew:
         return result
 
     def _run_phase_2(self, research_result: dict) -> dict:
+        # Pass only the fields Architecture needs — avoids bloating the prompt
+        arch_ctx = {k: research_result[k] for k in (
+            "app_name", "app_version", "app_vendor",
+            "installer_type", "silent_switches", "architecture",
+        ) if k in research_result}
         task = make_architecture_task(
             agent=self.architect,
-            research_output=json.dumps(research_result, indent=2),
+            research_output=json.dumps(arch_ctx),
             template_path=self.template_path,
             installer_path=self.installer_path,
         )
@@ -180,9 +202,12 @@ class PSADTCrew:
         return result
 
     def _run_phase_3(self, arch_result: dict) -> dict:
+        script_ctx = {k: arch_result[k] for k in (
+            "psadt_version", "package_dir", "spec_json",
+        ) if k in arch_result}
         task = make_scripting_task(
             agent=self.scripter,
-            architecture_output=json.dumps(arch_result, indent=2),
+            architecture_output=json.dumps(script_ctx),
         )
         crew = Crew(agents=[self.scripter], tasks=[task], process=Process.sequential, verbose=True)
         raw_output = crew.kickoff()
@@ -195,8 +220,12 @@ class PSADTCrew:
     def _run_phase_4(self, script_result: dict, research_result: dict) -> dict:
         task = make_qa_task(
             agent=self.qa_tester,
-            scripting_output=json.dumps(script_result, indent=2),
-            research_output=json.dumps(research_result, indent=2),
+            scripting_output=json.dumps({k: script_result[k] for k in (
+                "package_dir", "script_path", "installer_type",
+            ) if k in script_result}),
+            research_output=json.dumps({k: research_result[k] for k in (
+                "app_name", "product_code",
+            ) if k in research_result}),
             test_mode=self.test_mode,
         )
         crew = Crew(agents=[self.qa_tester], tasks=[task], process=Process.sequential, verbose=True)
@@ -211,25 +240,37 @@ class PSADTCrew:
     # HITL gate
     # ------------------------------------------------------------------
 
-    def _gate(self, phase: str, context: str) -> bool:
+    def _gate(self, phase: str, context: str, task_description: str = "") -> bool:
         """
-        If HITL is enabled: register an approval request and block until
-        the user approves or rejects (or timeout).
-        Returns True if approved (or HITL disabled), False if rejected.
+        Show terminal permission prompt, then (if HITL enabled) also register
+        a Gradio approval request and block until decided.
+        Returns True if approved, False if rejected.
         """
         if self._stop_requested:
             log.info(f"[HITL] Stop requested before phase: {phase}")
             return False
 
+        # Always show terminal prompt first
+        terminal_approved = ask_terminal_permission(
+            phase=phase,
+            context=context,
+            task_description=task_description,
+        )
+        if not terminal_approved:
+            log.info(f"[HITL] Rejected at terminal prompt — phase: {phase}")
+            return False
+
+        # If HITL bypass, terminal approval is sufficient
         if not HITL_ENABLED:
-            log.info(f"[HITL] Bypass mode — auto-approving phase: {phase}")
+            log.info(f"[HITL] Bypass mode — terminal-approved phase: {phase}")
             self._emit(phase, "hitl_bypassed", {"phase": phase, "context": context})
             return True
 
+        # Also wait for Gradio UI approval
         token_info = hitl_request_approval(phase, context)
         token = token_info["token"]
         self._emit(phase, "hitl_pending", {"phase": phase, "context": context, "token": token})
-        log.info(f"[HITL] Waiting for user approval — phase={phase}, token={token}")
+        log.info(f"[HITL] Waiting for Gradio approval — phase={phase}, token={token}")
 
         approved = hitl_wait_for_approval(token, timeout=600.0)
         self._emit(phase, "hitl_decided", {"phase": phase, "token": token, "approved": approved})
@@ -246,7 +287,23 @@ class PSADTCrew:
         script: dict,
         qa: dict,
     ) -> dict:
-        overall = "PASS" if qa.get("overall_result") == "PASS" else "FAIL"
+        # Normalise — LLM may return "pass", "PASS", "Installation PASS", etc.
+        # Also treat exit code 0 or 3010 (soft reboot) as PASS.
+        raw_result = str(qa.get("overall_result", "")).upper()
+        exit_code = qa.get("install_exit_code") or qa.get("exit_code")
+        try:
+            exit_ok = int(exit_code) in (0, 3010)
+        except (TypeError, ValueError):
+            exit_ok = False
+        overall = "PASS" if ("PASS" in raw_result or exit_ok) else "FAIL"
+
+        # Normalise cleanup — LLM may return flat keys or nested dict
+        cleanup_data = qa.get("cleanup") or {}
+        cleanup_done = (
+            cleanup_data.get("completed")
+            or cleanup_data.get("success")
+            or cleanup_data.get("cleanup_exit_code") == 0
+        ) if isinstance(cleanup_data, dict) else False
 
         record = {
             "app_name": research.get("app_name", self.app_name),
@@ -257,9 +314,9 @@ class PSADTCrew:
             "script_path": script.get("script_path"),
             "psadt_version": arch.get("psadt_version"),
             "qa_result": overall,
-            "qa_exit_code": qa.get("install_exit_code"),
+            "qa_exit_code": qa.get("install_exit_code") or qa.get("exit_code"),
             "validation": qa.get("validation", {}),
-            "cleanup_completed": qa.get("cleanup", {}).get("completed", False),
+            "cleanup_completed": bool(cleanup_done),
         }
 
         save_package_record(research.get("app_name", self.app_name), record)

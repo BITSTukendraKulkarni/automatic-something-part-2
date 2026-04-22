@@ -4,6 +4,8 @@ Utility helpers: history management, HITL gate, logging, exit-code lookup.
 
 import json
 import logging
+import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -164,9 +166,88 @@ def hitl_wait_for_approval(token: str, poll_interval: float = 1.0, timeout: floa
 # Misc helpers
 # ---------------------------------------------------------------------------
 def sanitize_app_name(name: str) -> str:
-    """Return a filesystem-safe version of an app name."""
-    import re
-    return re.sub(r'[^\w\-.]', '_', name).strip("_")
+    """
+    Return a filesystem-safe version of an app name.
+    - Replaces any character that is not alphanumeric, hyphen, or dot with underscore
+    - Collapses consecutive underscores
+    - Strips leading/trailing underscores and dots
+    - Caps at 64 characters
+    - Rejects Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    """
+    _WINDOWS_RESERVED = {
+        "CON","PRN","AUX","NUL",
+        "COM1","COM2","COM3","COM4","COM5","COM6","COM7","COM8","COM9",
+        "LPT1","LPT2","LPT3","LPT4","LPT5","LPT6","LPT7","LPT8","LPT9",
+    }
+    safe = re.sub(r'[^\w\-.]', '_', name)
+    safe = re.sub(r'_+', '_', safe)
+    safe = safe.strip("_.")[:64]
+    if not safe:
+        safe = "app"
+    if safe.upper() in _WINDOWS_RESERVED:
+        safe = f"_{safe}"
+    return safe
+
+
+def validate_package_path(pkg_dir: Path, output_base: Path) -> None:
+    """
+    Raise ValueError if pkg_dir is not safe to use as a package destination.
+    Checks:
+      1. Path stays inside output_base (prevents traversal)
+      2. Directory does not already exist (prevents collision/overwrite)
+      3. Parent directory is reachable and writable
+      4. Sufficient disk space (at least 500 MB free)
+      5. Path length within Windows MAX_PATH (260 chars)
+    """
+    import shutil as _shutil
+
+    # 1. Traversal check — resolve both and confirm containment
+    try:
+        resolved_pkg  = pkg_dir.resolve()
+        resolved_base = output_base.resolve()
+        resolved_pkg.relative_to(resolved_base)
+    except ValueError:
+        raise ValueError(
+            f"Package path '{pkg_dir}' escapes the allowed packages directory '{output_base}'. "
+            "Possible path traversal attempt."
+        )
+
+    # 2. Collision check
+    if pkg_dir.exists():
+        raise ValueError(
+            f"Package directory already exists: '{pkg_dir}'. "
+            "Delete it manually or use a different app name/version."
+        )
+
+    # 3. Parent writable
+    parent = pkg_dir.parent
+    if not parent.exists():
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            raise ValueError(f"Cannot create parent directory '{parent}' — permission denied.")
+    if not os.access(str(parent), os.W_OK):
+        raise ValueError(f"Parent directory '{parent}' is not writable.")
+
+    # 4. Disk space — require at least 500 MB free
+    _MIN_FREE_MB = 500
+    try:
+        usage = _shutil.disk_usage(str(parent))
+        free_mb = usage.free // (1024 * 1024)
+        if free_mb < _MIN_FREE_MB:
+            raise ValueError(
+                f"Insufficient disk space on '{parent.drive}': "
+                f"{free_mb} MB free, need at least {_MIN_FREE_MB} MB."
+            )
+    except (FileNotFoundError, PermissionError):
+        pass  # Non-fatal if we can't check
+
+    # 5. Path length
+    if len(str(pkg_dir)) > 200:
+        raise ValueError(
+            f"Package path is too long ({len(str(pkg_dir))} chars): '{pkg_dir}'. "
+            "Shorten the app name or version to stay within Windows path limits."
+        )
 
 
 def timestamp_slug() -> str:

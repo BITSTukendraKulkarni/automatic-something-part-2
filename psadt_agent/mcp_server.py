@@ -177,11 +177,14 @@ def get_installer_metadata(installer_path: str) -> dict:
 
     ext = path.suffix.lower()
 
+    # Escape single quotes in path for PowerShell string embedding
+    escaped_path = installer_path.replace("'", "''")
+
     if ext == ".msi":
         script = f"""
 try {{
     $installer = New-Object -ComObject WindowsInstaller.Installer
-    $db = $installer.OpenDatabase('{installer_path}', 0)
+    $db = $installer.OpenDatabase('{escaped_path}', 0)
     $view = $db.OpenView("SELECT Property, Value FROM Property WHERE Property IN ('ProductName','ProductVersion','Manufacturer','ProductCode')")
     $view.Execute()
     $props = @{{}}
@@ -205,7 +208,7 @@ try {{
 
     elif ext == ".exe":
         script = f"""
-$versionInfo = (Get-Item '{installer_path}').VersionInfo
+$versionInfo = (Get-Item '{escaped_path}').VersionInfo
 [PSCustomObject]@{{
     ProductName    = $versionInfo.ProductName
     ProductVersion = $versionInfo.ProductVersion
@@ -422,21 +425,65 @@ Get-WinEvent -LogName '{source}' -ErrorAction SilentlyContinue |
 
 @mcp.tool()
 def verify_app_installed_wmi(app_name_fragment: str) -> dict:
-    """Verify application installation state using WMI Win32_Product."""
-    script = f"""
-Get-WmiObject -Class Win32_Product |
-  Where-Object {{ $_.Name -like '*{app_name_fragment}*' }} |
-  Select-Object Name, Version, Vendor, InstallDate |
-  ConvertTo-Json -Depth 2
+    """
+    Verify application installation state using three sources in order:
+      1. Win32_Product  — MSI installs only; unreliable when run non-elevated,
+                          can silently return nothing even for installed MSIs,
+                          and never lists EXE/NSIS installs.
+      2. Get-Package    — PackageManagement; broader coverage across providers.
+      3. Registry       — HKLM/HKCU Uninstall keys; the most reliable source
+                          and the only one that catches EXE/NSIS installs like 7-Zip.
+    Callers should treat installed=True from any source as a valid PASS.
+    """
+    safe_fragment = app_name_fragment.replace("'", "''")
+
+    # 1. Win32_Product — MSI installs only
+    wmi_script = f"""
+try {{
+    $r = Get-CimInstance -ClassName Win32_Product -Filter "Name LIKE '%{safe_fragment}%'" -ErrorAction Stop |
+         Select-Object Name, Version, Vendor, InstallDate
+    if ($r) {{ $r | ConvertTo-Json -Depth 2 }} else {{ '[]' }}
+}} catch {{ '[]' }}
 """
-    r = run_powershell(script, timeout_seconds=60)
+    r = run_powershell(wmi_script, timeout_seconds=60)
     try:
-        data = json.loads(r["stdout"]) if r["stdout"] else []
-        if isinstance(data, dict):
-            data = [data]
-        return {"success": True, "installed": len(data) > 0, "matches": data}
+        wmi_data = json.loads(r["stdout"]) if r["stdout"] else []
+        if isinstance(wmi_data, dict):
+            wmi_data = [wmi_data]
     except Exception:
-        return {"success": True, "installed": False, "raw": r.get("stdout", "")}
+        wmi_data = []
+
+    if wmi_data:
+        return {"success": True, "installed": True, "source": "Win32_Product", "matches": wmi_data}
+
+    # 2. Get-Package — covers more package managers
+    pkg_script = f"Get-Package -Name '*{safe_fragment}*' -ErrorAction SilentlyContinue | Select-Object Name, Version, ProviderName | ConvertTo-Json -Depth 2"
+    r2 = run_powershell(pkg_script, timeout_seconds=30)
+    try:
+        pkg_data = json.loads(r2["stdout"]) if r2["stdout"] else []
+        if isinstance(pkg_data, dict):
+            pkg_data = [pkg_data]
+    except Exception:
+        pkg_data = []
+
+    if pkg_data:
+        return {"success": True, "installed": True, "source": "Get-Package", "matches": pkg_data}
+
+    # 3. Registry uninstall keys — works for EXE/NSIS and MSI installs
+    reg_result = find_installed_app_registry(app_name_fragment)
+    reg_matches = reg_result.get("matches", [])
+    if reg_matches:
+        return {
+            "success": True, "installed": True, "source": "registry",
+            "matches": [{"Name": m["DisplayName"], "Version": m["DisplayVersion"], "Publisher": m["Publisher"]} for m in reg_matches],
+            "note": "Not in Win32_Product (EXE/NSIS install) — found in registry uninstall keys",
+        }
+
+    return {
+        "success": True, "installed": False,
+        "source": "all_checked",
+        "note": f"Not found in Win32_Product, Get-Package, or registry for fragment: '{app_name_fragment}'",
+    }
 
 
 @mcp.tool()
@@ -471,8 +518,8 @@ def get_system_info() -> dict:
     """Return basic OS and hardware information."""
     script = """
 [PSCustomObject]@{
-    OS            = (Get-WmiObject Win32_OperatingSystem).Caption
-    OSVersion     = (Get-WmiObject Win32_OperatingSystem).Version
+    OS            = (Get-CimInstance Win32_OperatingSystem).Caption
+    OSVersion     = (Get-CimInstance Win32_OperatingSystem).Version
     Architecture  = $env:PROCESSOR_ARCHITECTURE
     ComputerName  = $env:COMPUTERNAME
     Username      = $env:USERNAME

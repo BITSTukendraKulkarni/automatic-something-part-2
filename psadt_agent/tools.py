@@ -6,7 +6,7 @@ Each tool calls the corresponding mcp_server.py function directly
 
 import json
 from pathlib import Path
-from typing import Optional, Type
+from typing import Any, Optional, Type
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
@@ -36,34 +36,45 @@ class InstallerPathInput(BaseModel):
 
 class SearchSwitchesInput(BaseModel):
     installer_path: str = Field(description="Absolute path to the installer")
-    app_name: str = Field(default="", description="Application name for web search context")
+    app_name: str = Field(description="Application name for context (use the detected app name)")
 
 class DependenciesInput(BaseModel):
     installer_path: str = Field(description="Absolute path to the installer")
     app_name: str = Field(description="Application name")
-    app_version: str = Field(default="", description="Application version")
+    app_version: str = Field(description="Application version (use detected version or empty string)")
 
 class TemplatePathInput(BaseModel):
-    template_path: str = Field(default=PSADT_TEMPLATE_PATH, description="Path to PSADT template directory")
+    template_path: str = Field(description=f"Path to PSADT template directory. Use this exact path: {PSADT_TEMPLATE_PATH}")
 
 class BuildFolderInput(BaseModel):
-    spec_json: str = Field(description="JSON-serialized PackageSpec fields")
-    template_path: str = Field(default=PSADT_TEMPLATE_PATH, description="PSADT template directory path")
+    app_name: str = Field(description="Application name, e.g. '7-Zip'")
+    app_version: str = Field(description="Application version, e.g. '26.00'")
+    app_vendor: str = Field(description="Vendor/publisher name")
+    installer_type: str = Field(description="Installer type: MSI, EXE, or MSIX")
+    silent_switches: str = Field(description="Silent installation switches")
+    installer_path: str = Field(description="Absolute path to the installer file")
+    template_path: str = Field(description=f"PSADT template directory path. Use this exact path: {PSADT_TEMPLATE_PATH}")
 
 class HistoryInput(BaseModel):
     app_name: str = Field(description="Application name to look up history for")
 
 class GenerateScriptInput(BaseModel):
-    spec_json: str = Field(description="JSON-serialized PackageSpec fields")
+    app_name: str = Field(description="Application name")
+    app_version: str = Field(description="Application version")
+    app_vendor: str = Field(description="Vendor/publisher name")
+    installer_type: str = Field(description="Installer type: MSI, EXE, or MSIX")
+    silent_switches: str = Field(description="Silent installation switches")
+    installer_path: str = Field(description="Absolute path to the installer file")
+    package_dir: str = Field(description="Package directory path returned by build_folder_structure")
 
 class ExecuteTestInput(BaseModel):
     package_dir: str = Field(description="Path to the built PSADT package directory")
-    deployment_type: str = Field(default="Install", description="Install | Uninstall | Repair")
-    test_mode: str = Field(default=TEST_MODE, description="host | sandbox")
+    deployment_type: str = Field(description="Deployment type: Install, Uninstall, or Repair. Use 'Install' by default.")
+    test_mode: str = Field(description=f"Execution mode: 'host' or 'sandbox'. Use '{TEST_MODE}' by default.")
 
 class ParseLogsInput(BaseModel):
-    app_name: str = Field(default="", description="App name fragment to filter logs")
-    log_path: str = Field(default="", description="Specific log file path (optional)")
+    app_name: str = Field(description="App name fragment to filter logs (use the app name being tested)")
+    log_path: str = Field(description="Specific log file path, or empty string to auto-detect")
 
 class VerifyRegistryInput(BaseModel):
     app_name_fragment: str = Field(description="Partial app name to search in uninstall registry keys")
@@ -76,12 +87,9 @@ class VerifyWmiInput(BaseModel):
 
 class CleanupInput(BaseModel):
     app_name: str = Field(description="Application name to uninstall post-test")
-    product_code: str = Field(default="", description="MSI product GUID if known")
-    uninstall_string: str = Field(default="", description="Raw uninstall command if known")
 
 class PowerShellInput(BaseModel):
     script: str = Field(description="PowerShell script block to execute")
-    timeout_seconds: int = Field(default=120, description="Execution timeout in seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +138,8 @@ def _search_silent_switches(installer_path: str, app_name: str = "") -> str:
         },
     }
     guide = switch_guides.get(itype, switch_guides["EXE"])
-    return json.dumps({"installer_type": itype, "metadata": meta, "switch_guide": guide}, indent=2)
+    slim_meta = {k: meta.get(k) for k in ("ProductName", "ProductVersion", "Manufacturer", "ProductCode") if meta.get(k)}
+    return json.dumps({"installer_type": itype, "meta": slim_meta, "switches": guide["recommended"]})
 
 
 def _analyze_dependencies(installer_path: str, app_name: str, app_version: str = "") -> str:
@@ -158,18 +167,10 @@ def _analyze_dependencies(installer_path: str, app_name: str, app_version: str =
     bundled = [f.name for f in files_dir.glob("vcredist*.exe")] if files_dir.exists() else []
 
     return json.dumps({
-        "app": app_name,
-        "version": app_version,
         "installer_type": meta.get("installer_type"),
-        "inferred_dependencies": dep_hints if dep_hints else ["No common dependencies detected — verify with app vendor documentation"],
-        "bundled_prerequisites": bundled,
-        "recommendation": (
-            "Include any required redistributables in the PSADT Files folder and install them "
-            "in the Pre-Installation phase before the main installer runs."
-            if dep_hints else
-            "No dependencies automatically detected. Confirm with vendor release notes."
-        ),
-    }, indent=2)
+        "dependencies": dep_hints if dep_hints else [],
+        "bundled": bundled,
+    })
 
 
 def _read_psadt_template(template_path: str = PSADT_TEMPLATE_PATH) -> str:
@@ -178,38 +179,62 @@ def _read_psadt_template(template_path: str = PSADT_TEMPLATE_PATH) -> str:
     if not tp.exists():
         return json.dumps({"success": False, "error": f"Template path not found: {template_path}"})
 
-    # Look for AppDeployToolkitMain.ps1 to extract version
-    main_script = tp / "AppDeployToolkit" / "AppDeployToolkitMain.ps1"
+    # PSADT v4: version is in the main Invoke-AppDeployToolkit.ps1
+    main_script = tp / "Invoke-AppDeployToolkit.ps1"
     version_info = "Unknown"
     available_functions = []
 
     if main_script.exists():
         content = main_script.read_text(encoding="utf-8", errors="replace")
-        # Extract version
         import re
-        ver_match = re.search(r'\$appDeployToolkitVersion\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+        ver_match = re.search(r'DeployAppScriptVersion\s*=\s*[\'"]([^\'"]+)[\'"]', content)
         if ver_match:
             version_info = ver_match.group(1)
-        # Extract exported functions
-        funcs = re.findall(r'^Function\s+([\w-]+)', content, re.MULTILINE)
-        available_functions = funcs[:50]  # cap for readability
+        # v4 ADT cmdlets are in the PSAppDeployToolkit module
+        available_functions = [
+            "Start-ADTMsiProcess", "Start-ADTProcess", "Get-ADTApplication",
+            "Show-ADTInstallationWelcome", "Show-ADTInstallationProgress",
+            "Write-ADTLogEntry", "Close-ADTSession", "Open-ADTSession",
+            "Get-ADTBoundParametersAndDefaultValues",
+        ]
 
-    # List structure
-    structure = mcp.list_directory(template_path, "**/*")
+    # Check Files\ dir exists for installer placement
+    files_dir_exists = (tp / "Files").exists()
 
     return json.dumps({
         "success": True,
         "template_path": str(tp),
         "psadt_version": version_info,
         "main_script_found": main_script.exists(),
+        "files_dir_exists": files_dir_exists,
         "available_functions": available_functions,
-        "structure": structure.get("entries", []),
-    }, indent=2)
+    })
 
 
-def _build_folder_structure(spec_json: str, template_path: str = PSADT_TEMPLATE_PATH) -> str:
+def _coerce_spec(spec_json) -> dict:
+    """Accept a dict, a JSON string, or a double-encoded JSON string."""
+    if isinstance(spec_json, dict):
+        # Remap legacy key name the LLM sometimes uses
+        if "product_code" in spec_json and "uninstall_product_code" not in spec_json:
+            spec_json["uninstall_product_code"] = spec_json.pop("product_code")
+        return spec_json
+    if isinstance(spec_json, str):
+        data = json.loads(spec_json)
+        # Handle double-encoded: {"spec_json": "{...}"}  or  plain string value
+        if isinstance(data, str):
+            data = json.loads(data)
+        if isinstance(data, dict) and "spec_json" in data and len(data) == 1:
+            inner = data["spec_json"]
+            if isinstance(inner, str):
+                inner = json.loads(inner)
+            return inner
+        return data
+    raise ValueError(f"Cannot coerce spec_json of type {type(spec_json)}")
+
+
+def _build_folder_structure(spec_json, template_path: str = PSADT_TEMPLATE_PATH) -> str:
     try:
-        spec_data = json.loads(spec_json)
+        spec_data = _coerce_spec(spec_json)
         spec = PackageSpec(**spec_data)
         pkg_dir = build_package_structure(spec, template_path)
         return json.dumps({"success": True, "package_dir": pkg_dir}, indent=2)
@@ -228,14 +253,14 @@ def _get_package_history(app_name: str) -> str:
     }, indent=2)
 
 
-def _generate_script(spec_json: str) -> str:
+def _generate_script(spec_json) -> str:
     try:
-        spec_data = json.loads(spec_json)
+        spec_data = _coerce_spec(spec_json)
         spec = PackageSpec(**spec_data)
         script_content = generate_deploy_script(spec)
         # Write to package dir if set
         if spec.package_dir:
-            script_path = Path(spec.package_dir) / "Deploy-Application.ps1"
+            script_path = Path(spec.package_dir) / "Invoke-AppDeployToolkit.ps1"
             script_path.write_text(script_content, encoding="utf-8")
             spec.script_path = str(script_path)
             log.info(f"Script written → {script_path}")
@@ -250,9 +275,9 @@ def _generate_script(spec_json: str) -> str:
 
 
 def _execute_install_test(package_dir: str, deployment_type: str = "Install", test_mode: str = TEST_MODE) -> str:
-    script_path = Path(package_dir) / "Deploy-Application.ps1"
+    script_path = Path(package_dir) / "Invoke-AppDeployToolkit.ps1"
     if not script_path.exists():
-        return json.dumps({"success": False, "error": f"Deploy-Application.ps1 not found in {package_dir}"})
+        return json.dumps({"success": False, "error": f"Invoke-AppDeployToolkit.ps1 not found in {package_dir}"})
 
     if test_mode == "sandbox":
         from psadt_template import generate_wsb_config
@@ -265,7 +290,7 @@ def _execute_install_test(package_dir: str, deployment_type: str = "Install", te
         f'& "{script_path}" '
         f'-DeploymentType {deployment_type} '
         f'-DeployMode Silent '
-        f'-AllowRebootPassThru:$false'
+        f'-SuppressRebootPassThru'
     )
     result = mcp.run_powershell(ps_cmd, timeout_seconds=300)
     exit_code = result.get("exit_code", -1)
@@ -310,10 +335,18 @@ def _cleanup_test_install(app_name: str, product_code: str = "", uninstall_strin
     """
     log.info(f"[Cleanup] Initiating post-test removal of '{app_name}'")
 
+    def _escape_ps(s: str) -> str:
+        """Escape a string for safe embedding inside a PowerShell single-quoted string."""
+        return s.replace("'", "''")
+
     if product_code:
-        ps = f'Start-Process msiexec.exe -ArgumentList "/x {product_code} /quiet /norestart" -Wait -PassThru | Select-Object ExitCode | ConvertTo-Json'
+        safe_guid = _escape_ps(product_code)
+        ps = f"Start-Process msiexec.exe -ArgumentList '/x {safe_guid} /quiet /norestart' -Wait -PassThru | Select-Object ExitCode | ConvertTo-Json"
     elif uninstall_string:
-        ps = f'$r = Start-Process -FilePath "cmd.exe" -ArgumentList \'/c "{uninstall_string}"\' -Wait -PassThru; $r.ExitCode'
+        # Pass via environment variable to avoid any quoting/injection issues
+        import os
+        os.environ["_PSADT_UNINSTALL_CMD"] = uninstall_string
+        ps = '$r = Start-Process -FilePath "cmd.exe" -ArgumentList (\'/c \' + $env:_PSADT_UNINSTALL_CMD) -Wait -PassThru; $r.ExitCode'
     else:
         # Find via registry and attempt removal
         reg_result = mcp.find_installed_app_registry(app_name)
@@ -324,7 +357,9 @@ def _cleanup_test_install(app_name: str, product_code: str = "", uninstall_strin
         quiet_str = match.get("QuietUninstallString") or match.get("UninstallString", "")
         if not quiet_str:
             return json.dumps({"success": False, "error": "No uninstall string found in registry"})
-        ps = f'$r = Start-Process -FilePath "cmd.exe" -ArgumentList \'/c "{quiet_str}"\' -Wait -PassThru; $r.ExitCode'
+        import os
+        os.environ["_PSADT_UNINSTALL_CMD"] = quiet_str
+        ps = '$r = Start-Process -FilePath "cmd.exe" -ArgumentList (\'/c \' + $env:_PSADT_UNINSTALL_CMD) -Wait -PassThru; $r.ExitCode'
 
     result = mcp.run_powershell(ps, timeout_seconds=180)
     exit_code = result.get("exit_code", -1)
@@ -362,29 +397,43 @@ class SearchSilentSwitchesTool(BaseTool):
     name: str = "search_silent_switches"
     description: str = "Determine the correct silent installation switches for a given installer file."
     args_schema: Type[BaseModel] = SearchSwitchesInput
-    def _run(self, installer_path: str, app_name: str = "") -> str:
-        return _search_silent_switches(installer_path, app_name)
+    def _run(self, installer_path: str, app_name: str) -> str:
+        return _search_silent_switches(installer_path, app_name or "")
 
 class AnalyzeDependenciesTool(BaseTool):
     name: str = "analyze_dependencies"
     description: str = "Analyze an installer for required runtime dependencies (e.g., .NET, VCRedist)."
     args_schema: Type[BaseModel] = DependenciesInput
-    def _run(self, installer_path: str, app_name: str, app_version: str = "") -> str:
-        return _analyze_dependencies(installer_path, app_name, app_version)
+    def _run(self, installer_path: str, app_name: str, app_version: str) -> str:
+        return _analyze_dependencies(installer_path, app_name, app_version or "")
 
 class ReadPsadtTemplateTool(BaseTool):
     name: str = "read_psadt_template"
-    description: str = "Read and validate a PSADT template directory, returning the toolkit version and available functions."
+    description: str = f"Read and validate the PSADT template directory at {PSADT_TEMPLATE_PATH}, returning the toolkit version and available functions."
     args_schema: Type[BaseModel] = TemplatePathInput
-    def _run(self, template_path: str = PSADT_TEMPLATE_PATH) -> str:
-        return _read_psadt_template(template_path)
+    def _run(self, template_path: str) -> str:
+        return _read_psadt_template(template_path or PSADT_TEMPLATE_PATH)
 
 class BuildFolderStructureTool(BaseTool):
     name: str = "build_folder_structure"
     description: str = "Create the PSADT package folder structure by copying the template and injecting the installer."
     args_schema: Type[BaseModel] = BuildFolderInput
-    def _run(self, spec_json: str, template_path: str = PSADT_TEMPLATE_PATH) -> str:
-        return _build_folder_structure(spec_json, template_path)
+    def _run(self, app_name: str, app_version: str, app_vendor: str, installer_type: str,
+             silent_switches: str, installer_path: str, template_path: str) -> str:
+        from config import PACKAGES_DIR
+        safe_version = app_version.replace(" ", "_")
+        safe_name = app_name.replace(" ", "_")
+        package_dir = str(PACKAGES_DIR / f"{safe_name}_{safe_version}")
+        meta = json.loads(_get_installer_metadata(installer_path))
+        product_code = meta.get("ProductCode", "")
+        architecture = meta.get("architecture", "x64") or "x64"
+        spec = {
+            "app_name": app_name, "app_version": app_version, "app_vendor": app_vendor,
+            "installer_type": installer_type, "silent_switches": silent_switches,
+            "uninstall_product_code": product_code, "architecture": architecture,
+            "dependencies": [], "installer_path": installer_path, "package_dir": package_dir,
+        }
+        return _build_folder_structure(spec, template_path or PSADT_TEMPLATE_PATH)
 
 class GetPackageHistoryTool(BaseTool):
     name: str = "get_package_history"
@@ -397,22 +446,32 @@ class GenerateScriptTool(BaseTool):
     name: str = "generate_deploy_script"
     description: str = "Generate and write a complete Deploy-Application.ps1 for the PSADT package."
     args_schema: Type[BaseModel] = GenerateScriptInput
-    def _run(self, spec_json: str) -> str:
-        return _generate_script(spec_json)
+    def _run(self, app_name: str, app_version: str, app_vendor: str, installer_type: str,
+             silent_switches: str, installer_path: str, package_dir: str) -> str:
+        meta = json.loads(_get_installer_metadata(installer_path))
+        product_code = meta.get("ProductCode", "")
+        architecture = meta.get("architecture", "x64") or "x64"
+        spec = {
+            "app_name": app_name, "app_version": app_version, "app_vendor": app_vendor,
+            "installer_type": installer_type, "silent_switches": silent_switches,
+            "uninstall_product_code": product_code, "architecture": architecture,
+            "dependencies": [], "installer_path": installer_path, "package_dir": package_dir,
+        }
+        return _generate_script(spec)
 
 class ExecuteInstallTestTool(BaseTool):
     name: str = "execute_install_test"
     description: str = "Execute the PSADT Deploy-Application.ps1 in Install mode on the host or in Windows Sandbox."
     args_schema: Type[BaseModel] = ExecuteTestInput
-    def _run(self, package_dir: str, deployment_type: str = "Install", test_mode: str = TEST_MODE) -> str:
-        return _execute_install_test(package_dir, deployment_type, test_mode)
+    def _run(self, package_dir: str, deployment_type: str, test_mode: str) -> str:
+        return _execute_install_test(package_dir, deployment_type or "Install", test_mode or TEST_MODE)
 
 class ParseLogsTool(BaseTool):
     name: str = "parse_psadt_logs"
     description: str = "Parse PSADT/MSI logs from C:\\Windows\\Logs\\Software to determine install success or failure."
     args_schema: Type[BaseModel] = ParseLogsInput
-    def _run(self, app_name: str = "", log_path: str = "") -> str:
-        return _parse_logs(app_name, log_path)
+    def _run(self, app_name: str, log_path: str) -> str:
+        return _parse_logs(app_name or "", log_path or "")
 
 class VerifyRegistryTool(BaseTool):
     name: str = "verify_registry_installation"
@@ -439,15 +498,15 @@ class CleanupTestInstallTool(BaseTool):
     name: str = "cleanup_test_installation"
     description: str = "Uninstall the test application after a successful QA test to restore the system to its original state."
     args_schema: Type[BaseModel] = CleanupInput
-    def _run(self, app_name: str, product_code: str = "", uninstall_string: str = "") -> str:
-        return _cleanup_test_install(app_name, product_code, uninstall_string)
+    def _run(self, app_name: str) -> str:
+        return _cleanup_test_install(app_name, "", "")
 
 class RunPowerShellTool(BaseTool):
     name: str = "run_powershell"
     description: str = "Execute an arbitrary PowerShell script and return stdout, stderr, and exit code."
     args_schema: Type[BaseModel] = PowerShellInput
-    def _run(self, script: str, timeout_seconds: int = 120) -> str:
-        return _run_powershell(script, timeout_seconds)
+    def _run(self, script: str) -> str:
+        return _run_powershell(script, 120)
 
 
 # Singleton instances imported by agents.py

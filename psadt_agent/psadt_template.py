@@ -1,9 +1,8 @@
 """
-PSADT Package Builder
-- Reads and validates a user-supplied PSADT template
-- Generates a fully-populated Deploy-Application.ps1
-- Builds the standard PSADT folder structure
-Supports: EXE, MSI, MSIX installers
+PSADT v4 Package Builder
+- Copies the v4 template to C:/Temp/Packages/<AppName_Version_Slug>/
+- Places the installer in the Files/ subfolder
+- Generates a populated Invoke-AppDeployToolkit.ps1 using v4 ADT cmdlets
 """
 
 import re
@@ -12,32 +11,31 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
 
-from utils import get_logger, sanitize_app_name, timestamp_slug
+from utils import get_logger, sanitize_app_name, timestamp_slug, validate_package_path
 from config import PACKAGES_DIR, PSADT_VERSION
 
 log = get_logger("psadt-template")
 
+
 # ---------------------------------------------------------------------------
-# Data model for package parameters
+# Data model
 # ---------------------------------------------------------------------------
 @dataclass
 class PackageSpec:
     app_name: str
     app_version: str
     app_vendor: str
-    installer_path: str          # absolute path to installer file
+    installer_path: str
     installer_type: str          # EXE | MSI | MSIX
-    silent_switches: str         # e.g. /quiet /norestart
-    # Optional
+    silent_switches: str
     architecture: str = "x64"
     install_location: Optional[str] = None
-    dependencies: list[str] = field(default_factory=list)
-    pre_install_commands: list[str] = field(default_factory=list)
-    post_install_commands: list[str] = field(default_factory=list)
-    uninstall_product_code: Optional[str] = None  # GUID for MSI
+    dependencies: list = field(default_factory=list)
+    pre_install_commands: list = field(default_factory=list)
+    post_install_commands: list = field(default_factory=list)
+    uninstall_product_code: Optional[str] = None
     custom_uninstall_string: Optional[str] = None
     psadt_version: str = PSADT_VERSION
-    # Populated after build
     package_dir: Optional[str] = None
     script_path: Optional[str] = None
 
@@ -45,9 +43,13 @@ class PackageSpec:
 # ---------------------------------------------------------------------------
 # Folder structure builder
 # ---------------------------------------------------------------------------
+_ALLOWED_INSTALLER_EXTENSIONS = {".exe", ".msi", ".msix", ".msp", ".msu", ".appx"}
+
+
 def build_package_structure(spec: PackageSpec, template_path: str, output_base: Optional[str] = None) -> str:
     """
-    Copy the PSADT template to a new package folder and inject the installer.
+    Copy PSADT v4 template to C:\\Temp\\Packages\\<AppName_Version_Slug>
+    and place the installer in the Files\\ subfolder.
     Returns the path to the new package directory.
     """
     safe_name = sanitize_app_name(spec.app_name)
@@ -56,269 +58,347 @@ def build_package_structure(spec: PackageSpec, template_path: str, output_base: 
     out_base  = Path(output_base) if output_base else PACKAGES_DIR
     pkg_dir   = out_base / f"{safe_name}_{safe_ver}_{slug}"
 
+    # --- Validate package destination path ---
+    validate_package_path(pkg_dir, out_base)
+
+    # --- Validate template ---
     template = Path(template_path)
     if not template.exists():
         raise FileNotFoundError(f"PSADT template not found: {template_path}")
+    if not template.is_dir():
+        raise ValueError(f"Template path is not a directory: {template_path}")
 
-    log.info(f"Copying PSADT template → {pkg_dir}")
+    # --- Validate installer source ---
+    installer_src = Path(spec.installer_path)
+    if not installer_src.exists():
+        raise FileNotFoundError(f"Installer not found: {spec.installer_path}")
+    if not installer_src.is_file():
+        raise ValueError(f"Installer path is not a file: {spec.installer_path}")
+    if installer_src.suffix.lower() not in _ALLOWED_INSTALLER_EXTENSIONS:
+        raise ValueError(
+            f"Unsupported installer type '{installer_src.suffix}'. "
+            f"Allowed: {', '.join(sorted(_ALLOWED_INSTALLER_EXTENSIONS))}"
+        )
+
+    log.info(f"Copying PSADT v4 template → {pkg_dir}")
     shutil.copytree(str(template), str(pkg_dir), dirs_exist_ok=False)
 
-    # Copy installer into the Files subfolder
+    # Place installer in Files\
     files_dir = pkg_dir / "Files"
     files_dir.mkdir(exist_ok=True)
-    installer_src = Path(spec.installer_path)
-    if installer_src.exists():
-        shutil.copy2(str(installer_src), str(files_dir / installer_src.name))
-        log.info(f"Installer copied → {files_dir / installer_src.name}")
-    else:
-        log.warning(f"Installer not found at {spec.installer_path} — skipping copy")
+    shutil.copy2(str(installer_src), str(files_dir / installer_src.name))
+    log.info(f"Installer copied → {files_dir / installer_src.name}")
 
     spec.package_dir = str(pkg_dir)
     return str(pkg_dir)
 
 
 # ---------------------------------------------------------------------------
-# Deploy-Application.ps1 generator
+# Invoke-AppDeployToolkit.ps1 generator (PSADT v4)
 # ---------------------------------------------------------------------------
 def generate_deploy_script(spec: PackageSpec) -> str:
     """
-    Return the full text of a Deploy-Application.ps1 tailored to the PackageSpec.
-    Follows PSADT v3.x conventions (supports 3.8–3.10.x).
+    Return the full text of a PSADT v4 Invoke-AppDeployToolkit.ps1
+    populated with install, uninstall, and repair logic for the given spec.
     """
-    safe_name = spec.app_name.replace("'", "''")
-    safe_ver  = spec.app_version.replace("'", "''")
-    safe_vendor = spec.app_vendor.replace("'", "''")
-    installer_filename = Path(spec.installer_path).name
+    safe_vendor  = spec.app_vendor.replace("'", "''")
+    safe_name    = spec.app_name.replace("'", "''")
+    safe_ver     = spec.app_version.replace("'", "''")
+    installer_fn = Path(spec.installer_path).name
 
-    # Build install command block
-    install_block = _build_install_block(spec, installer_filename)
-    # Build uninstall block (cleanup of previous versions)
+    install_block   = _build_install_block(spec, installer_fn)
     uninstall_block = _build_uninstall_block(spec)
-    # Pre/post install extras
-    pre_cmds  = "\n".join(f"\t\tExecute-Process -Path 'cmd.exe' -Parameters '/c {c}' -WindowStyle Hidden" for c in spec.pre_install_commands)
-    post_cmds = "\n".join(f"\t\tExecute-Process -Path 'cmd.exe' -Parameters '/c {c}' -WindowStyle Hidden" for c in spec.post_install_commands)
-    dep_notes = "\n".join(f"\t\t## Dependency: {d}" for d in spec.dependencies) if spec.dependencies else "\t\t## No additional dependencies"
+    repair_block    = _build_repair_block(spec, installer_fn)
+
+    pre_cmds  = "\n".join(
+        f"    Start-ADTProcess -FilePath 'cmd.exe' -ArgumentList '/c {c}' -WindowStyle Hidden"
+        for c in spec.pre_install_commands
+    )
+    post_cmds = "\n".join(
+        f"    Start-ADTProcess -FilePath 'cmd.exe' -ArgumentList '/c {c}' -WindowStyle Hidden"
+        for c in spec.post_install_commands
+    )
 
     script = f'''\
 <#
 .SYNOPSIS
-    PSADT Deploy-Application.ps1 — Auto-generated by PSADT Agentic AI
-    App     : {spec.app_name} {spec.app_version}
-    Vendor  : {spec.app_vendor}
-    Type    : {spec.installer_type}
-    Created : $(Get-Date -Format 'yyyy-MM-dd HH:mm')
-.NOTES
-    PowerShell App Deployment Toolkit v{spec.psadt_version}
+    PSAppDeployToolkit - This script performs the installation or uninstallation of an application(s).
+
+.DESCRIPTION
+    Auto-generated by PSADT Agentic AI
+    App    : {spec.app_name} {spec.app_version}
+    Vendor : {spec.app_vendor}
+    Type   : {spec.installer_type}
+
+.LINK
     https://psappdeploytoolkit.com
 #>
 
 [CmdletBinding()]
-Param (
+param
+(
     [Parameter(Mandatory = $false)]
-    [ValidateSet('Install','Uninstall','Repair')]
-    [string]$DeploymentType = 'Install',
+    [ValidateSet('Install', 'Uninstall', 'Repair')]
+    [System.String]$DeploymentType,
+
     [Parameter(Mandatory = $false)]
-    [ValidateSet('Interactive','Silent','NonInteractive')]
-    [string]$DeployMode = 'NonInteractive',
+    [ValidateSet('Auto', 'Interactive', 'NonInteractive', 'Silent')]
+    [System.String]$DeployMode,
+
     [Parameter(Mandatory = $false)]
-    [switch]$AllowRebootPassThru = $false,
+    [System.Management.Automation.SwitchParameter]$SuppressRebootPassThru,
+
     [Parameter(Mandatory = $false)]
-    [switch]$TerminalServerMode = $false,
+    [System.Management.Automation.SwitchParameter]$TerminalServerMode,
+
     [Parameter(Mandatory = $false)]
-    [switch]$DisableLogging = $false
+    [System.Management.Automation.SwitchParameter]$DisableLogging
 )
 
-## ---------------------------------------------------------------------------
-## VARIABLES
-## ---------------------------------------------------------------------------
-[string]$appVendor        = '{safe_vendor}'
-[string]$appName          = '{safe_name}'
-[string]$appVersion       = '{safe_ver}'
-[string]$appArch          = '{spec.architecture}'
-[string]$appLang          = 'EN'
-[string]$appRevision      = '01'
-[string]$appScriptVersion = '1.0.0'
-[string]$appScriptDate    = (Get-Date -Format 'MM/dd/yyyy')
-[string]$appScriptAuthor  = 'PSADT Agentic AI'
 
-## Suppress ALL reboot actions
-$global:AllowRebootPassThru = $false
+##================================================
+## MARK: Variables
+##================================================
 
-## ---------------------------------------------------------------------------
-## TOOLKIT INIT
-## ---------------------------------------------------------------------------
-Try {{
-    [string]$scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Definition
-    . "$scriptDirectory\\AppDeployToolkit\\AppDeployToolkitMain.ps1"
-}}
-Catch {{
-    [int32]$mainExitCode = 60008
-    Write-Error -Message "[$appName] Failed to import AppDeployToolkitMain.ps1: $_" -ErrorAction 'Continue'
-    Exit $mainExitCode
+$adtSession = @{{
+    AppVendor            = '{safe_vendor}'
+    AppName              = '{safe_name}'
+    AppVersion           = '{safe_ver}'
+    AppArch              = '{spec.architecture}'
+    AppLang              = 'EN'
+    AppRevision          = '01'
+    AppSuccessExitCodes  = @(0)
+    AppRebootExitCodes   = @(1641, 3010)
+    AppProcessesToClose  = @()
+    AppScriptVersion     = '1.0.0'
+    AppScriptDate        = '{__import__("datetime").date.today()}'
+    AppScriptAuthor      = 'PSADT Agentic AI'
+    RequireAdmin         = $true
+    InstallName          = ''
+    InstallTitle         = ''
+    DeployAppScriptFriendlyName = $MyInvocation.MyCommand.Name
+    DeployAppScriptParameters   = $PSBoundParameters
+    DeployAppScriptVersion      = '4.1.8'
 }}
 
-## ---------------------------------------------------------------------------
-## INSTALLATION
-## ---------------------------------------------------------------------------
-If ($deploymentType -ine 'Uninstall' -and $deploymentType -ine 'Repair') {{
 
-    ## ---- PRE-INSTALLATION ------------------------------------------------
-    [string]$installPhase = 'Pre-Installation'
-    Write-Log -Message "[$installPhase] Starting $appName $appVersion" -Source $installPhase
+function Install-ADTDeployment
+{{
+    [CmdletBinding()]
+    param()
 
-    ## Close conflicting processes (add as needed)
-    # Show-InstallationWelcome -CloseApps 'processname' -Silent -AllowDefer -DeferTimes 3
+    ##================================================
+    ## MARK: Pre-Install
+    ##================================================
+    $adtSession.InstallPhase = "Pre-$($adtSession.DeploymentType)"
 
-    ## Show progress silently
-    Show-InstallationProgress -StatusMessage "Installing $appName $appVersion. Please wait..."
+    ## Close running processes if any are defined above in AppProcessesToClose
+    $saiwParams = @{{ AllowDefer = $true; DeferTimes = 3; CheckDiskSpace = $true; PersistPrompt = $true }}
+    if ($adtSession.AppProcessesToClose.Count -gt 0) {{ $saiwParams.Add('CloseProcesses', $adtSession.AppProcessesToClose) }}
+    Show-ADTInstallationWelcome @saiwParams
+    Show-ADTInstallationProgress
 
-    ## CLEANUP: Remove any previously installed version of the application
-    Write-Log -Message "[$installPhase] Checking for existing installations to remove..." -Source $installPhase
+    ## Remove any previously installed version
 {uninstall_block}
 
-    ## Dependency notes
-{dep_notes}
 {pre_cmds}
 
-    ## ---- INSTALLATION ----------------------------------------------------
-    [string]$installPhase = 'Installation'
-    Write-Log -Message "[$installPhase] Installing $appName $appVersion" -Source $installPhase
+    ##================================================
+    ## MARK: Install
+    ##================================================
+    $adtSession.InstallPhase = $adtSession.DeploymentType
 
 {install_block}
 
-    ## ---- POST-INSTALLATION -----------------------------------------------
-    [string]$installPhase = 'Post-Installation'
-    Write-Log -Message "[$installPhase] Completing $appName $appVersion setup" -Source $installPhase
+    ##================================================
+    ## MARK: Post-Install
+    ##================================================
+    $adtSession.InstallPhase = "Post-$($adtSession.DeploymentType)"
 
 {post_cmds}
+}}
 
-    ## Suppress all reboots
-    Set-RegistryKey -Key 'HKLM:SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update' `
-                    -Name 'RebootRequired' -Value 0 -Type DWord -ErrorAction SilentlyContinue
-    Write-Log -Message "[$installPhase] Installation of $appName $appVersion completed." -Source $installPhase
 
-}} ElseIf ($deploymentType -ieq 'Uninstall') {{
+function Uninstall-ADTDeployment
+{{
+    [CmdletBinding()]
+    param()
 
-    ## ---- UNINSTALLATION --------------------------------------------------
-    [string]$installPhase = 'Uninstallation'
-    Write-Log -Message "[$installPhase] Uninstalling $appName" -Source $installPhase
+    ##================================================
+    ## MARK: Pre-Uninstall
+    ##================================================
+    $adtSession.InstallPhase = "Pre-$($adtSession.DeploymentType)"
 
-    Show-InstallationProgress -StatusMessage "Uninstalling $appName. Please wait..."
+    if ($adtSession.AppProcessesToClose.Count -gt 0)
+    {{
+        Show-ADTInstallationWelcome -CloseProcesses $adtSession.AppProcessesToClose -CloseProcessesCountdown 60
+    }}
+    Show-ADTInstallationProgress
+
+    ##================================================
+    ## MARK: Uninstall
+    ##================================================
+    $adtSession.InstallPhase = $adtSession.DeploymentType
 
 {uninstall_block}
 
-    Write-Log -Message "[$installPhase] Uninstallation of $appName completed." -Source $installPhase
-
-}} ElseIf ($deploymentType -ieq 'Repair') {{
-
-    ## ---- REPAIR ----------------------------------------------------------
-    [string]$installPhase = 'Repair'
-    Write-Log -Message "[$installPhase] Repairing $appName $appVersion" -Source $installPhase
-
-{install_block}
-
+    ##================================================
+    ## MARK: Post-Uninstall
+    ##================================================
+    $adtSession.InstallPhase = "Post-$($adtSession.DeploymentType)"
 }}
 
-## ---------------------------------------------------------------------------
-## FINALIZATION
-## ---------------------------------------------------------------------------
-Exit-Script -ExitCode $mainExitCode
+
+function Repair-ADTDeployment
+{{
+    [CmdletBinding()]
+    param()
+
+    ##================================================
+    ## MARK: Pre-Repair
+    ##================================================
+    $adtSession.InstallPhase = "Pre-$($adtSession.DeploymentType)"
+
+    if ($adtSession.AppProcessesToClose.Count -gt 0)
+    {{
+        Show-ADTInstallationWelcome -CloseProcesses $adtSession.AppProcessesToClose -CloseProcessesCountdown 60
+    }}
+    Show-ADTInstallationProgress
+
+    ##================================================
+    ## MARK: Repair
+    ##================================================
+    $adtSession.InstallPhase = $adtSession.DeploymentType
+
+{repair_block}
+
+    ##================================================
+    ## MARK: Post-Repair
+    ##================================================
+    $adtSession.InstallPhase = "Post-$($adtSession.DeploymentType)"
+}}
+
+
+##================================================
+## MARK: Initialization
+##================================================
+
+$ErrorActionPreference = [System.Management.Automation.ActionPreference]::Stop
+$ProgressPreference    = [System.Management.Automation.ActionPreference]::SilentlyContinue
+Set-StrictMode -Version 1
+
+try
+{{
+    if (Test-Path -LiteralPath "$PSScriptRoot\\PSAppDeployToolkit\\PSAppDeployToolkit.psd1" -PathType Leaf)
+    {{
+        Get-ChildItem -LiteralPath "$PSScriptRoot\\PSAppDeployToolkit" -Recurse -File | Unblock-File -ErrorAction Ignore
+        Import-Module -FullyQualifiedName @{{ ModuleName = "$PSScriptRoot\\PSAppDeployToolkit\\PSAppDeployToolkit.psd1"; Guid = '8c3c366b-8606-4576-9f2d-4051144f7ca2'; ModuleVersion = '4.1.8' }} -Force
+    }}
+    else
+    {{
+        Import-Module -FullyQualifiedName @{{ ModuleName = 'PSAppDeployToolkit'; Guid = '8c3c366b-8606-4576-9f2d-4051144f7ca2'; ModuleVersion = '4.1.8' }} -Force
+    }}
+
+    $iadtParams  = Get-ADTBoundParametersAndDefaultValues -Invocation $MyInvocation
+    $adtSession  = Remove-ADTHashtableNullOrEmptyValues -Hashtable $adtSession
+    $adtSession  = Open-ADTSession @adtSession @iadtParams -PassThru
+}}
+catch
+{{
+    $Host.UI.WriteErrorLine((Out-String -InputObject $_ -Width ([System.Int32]::MaxValue)))
+    exit 60008
+}}
+
+
+##================================================
+## MARK: Invocation
+##================================================
+
+try
+{{
+    Get-ChildItem -LiteralPath $PSScriptRoot -Directory | & {{
+        process
+        {{
+            if ($_.Name -match 'PSAppDeployToolkit\\..+$')
+            {{
+                Get-ChildItem -LiteralPath $_.FullName -Recurse -File | Unblock-File -ErrorAction Ignore
+                Import-Module -Name $_.FullName -Force
+            }}
+        }}
+    }}
+
+    & "$($adtSession.DeploymentType)-ADTDeployment"
+    Close-ADTSession
+}}
+catch
+{{
+    $mainErrorMessage = "An unhandled error within [$($MyInvocation.MyCommand.Name)] has occurred.`n$(Resolve-ADTErrorRecord -ErrorRecord $_)"
+    Write-ADTLogEntry -Message $mainErrorMessage -Severity 3
+    Close-ADTSession -ExitCode 60001
+}}
 '''
     return script
 
 
-def _build_install_block(spec: PackageSpec, installer_filename: str) -> str:
+def _build_install_block(spec: PackageSpec, installer_fn: str) -> str:
     itype = spec.installer_type.upper()
+    switches = spec.silent_switches.replace("'", "''")
 
     if itype == "MSI":
-        return f"""\
-    ## MSI Installation — all users, no reboot
-    Execute-MSI -Action Install `
-                -Path "$dirFiles\\{installer_filename}" `
-                -Parameters '{spec.silent_switches} ALLUSERS=1 REBOOT=ReallySuppress' `
-                -PassThru"""
-
+        return (
+            f"    ## MSI silent install\n"
+            f"    Start-ADTMsiProcess -Action Install "
+            f"-FilePath \"$($adtSession.DirFiles)\\{installer_fn}\" "
+            f"-ArgumentList '{switches} ALLUSERS=1 REBOOT=ReallySuppress'"
+        )
     elif itype == "MSIX":
-        return f"""\
-    ## MSIX / AppX Installation
-    Execute-Process -Path 'PowerShell.exe' `
-                    -Parameters '-NonInteractive -NoProfile -Command "Add-AppxProvisionedPackage -Online -PackagePath \\"$dirFiles\\{installer_filename}\\" -SkipLicense"' `
-                    -WindowStyle Hidden -PassThru"""
-
-    else:  # EXE (default)
-        return f"""\
-    ## EXE Silent Installation — all users, no reboot
-    Execute-Process -Path "$dirFiles\\{installer_filename}" `
-                    -Parameters '{spec.silent_switches}' `
-                    -WindowStyle Hidden `
-                    -PassThru"""
+        return (
+            f"    ## MSIX provisioned install\n"
+            f"    Start-ADTProcess -FilePath 'PowerShell.exe' "
+            f"-ArgumentList '-NonInteractive -NoProfile -Command "
+            f"\"Add-AppxProvisionedPackage -Online -PackagePath \\\"$($adtSession.DirFiles)\\{installer_fn}\\\" -SkipLicense\"' "
+            f"-WindowStyle Hidden"
+        )
+    else:  # EXE
+        return (
+            f"    ## EXE silent install\n"
+            f"    Start-ADTProcess -FilePath \"$($adtSession.DirFiles)\\{installer_fn}\" "
+            f"-ArgumentList '{switches}' -WindowStyle Hidden"
+        )
 
 
 def _build_uninstall_block(spec: PackageSpec) -> str:
-    safe_name = spec.app_name.replace("'", "''")
+    safe_name   = spec.app_name.replace("'", "''")
+    safe_vendor = spec.app_vendor.replace("'", "''")
+    app_type    = "MSI" if spec.installer_type.upper() == "MSI" else "EXE"
 
-    if spec.uninstall_product_code:
-        # MSI product code known
-        guid = spec.uninstall_product_code
-        return f"""\
-    ## Uninstall previous MSI version by product code (any version)
-    [array]$installedVersions = Get-InstalledApplication -Name '{safe_name}'
-    ForEach ($app in $installedVersions) {{
-        If ($app.UninstallSubkey) {{
-            Write-Log -Message "Removing previous version: $($app.DisplayName) $($app.DisplayVersion)" -Source $installPhase
-            Execute-MSI -Action Uninstall -Path $app.UninstallSubkey `
-                        -Parameters '/quiet /norestart REBOOT=ReallySuppress'
-        }}
-    }}
-    ## Also attempt direct product code removal
-    Execute-MSI -Action Uninstall -Path '{guid}' `
-                -Parameters '/quiet /norestart REBOOT=ReallySuppress' `
-                -ErrorAction SilentlyContinue"""
+    return (
+        f"    ## Remove any existing version of the application\n"
+        f"    Uninstall-ADTApplication -Name '{safe_name}' -ApplicationType {app_type} "
+        f"-FilterScript {{ $_.Publisher -match '{safe_vendor}' }}"
+    )
 
-    elif spec.custom_uninstall_string:
-        uninstall_cmd = spec.custom_uninstall_string.replace("'", "''")
-        return f"""\
-    ## Uninstall previous version via known uninstall string
-    [array]$installedVersions = Get-InstalledApplication -Name '{safe_name}'
-    ForEach ($app in $installedVersions) {{
-        Write-Log -Message "Removing previous version: $($app.DisplayName) $($app.DisplayVersion)" -Source $installPhase
-        Execute-Process -Path 'cmd.exe' `
-                        -Parameters '/c "{uninstall_cmd}"' `
-                        -WindowStyle Hidden -ErrorAction SilentlyContinue
-    }}"""
 
+def _build_repair_block(spec: PackageSpec, installer_fn: str) -> str:
+    itype = spec.installer_type.upper()
+    switches = spec.silent_switches.replace("'", "''")
+
+    if itype == "MSI":
+        return (
+            f"    ## MSI repair\n"
+            f"    Start-ADTMsiProcess -Action Repair "
+            f"-FilePath \"$($adtSession.DirFiles)\\{installer_fn}\" "
+            f"-ArgumentList '{switches} REBOOT=ReallySuppress'"
+        )
     else:
-        # Generic — query registry and attempt quiet uninstall
-        return f"""\
-    ## Generic cleanup: uninstall any existing version of '{safe_name}'
-    [array]$installedVersions = Get-InstalledApplication -Name '{safe_name}'
-    ForEach ($app in $installedVersions) {{
-        Write-Log -Message "Removing existing version: $($app.DisplayName) $($app.DisplayVersion)" -Source $installPhase
-        If ($app.UninstallString -like 'msiexec*') {{
-            ## MSI uninstall
-            $productCode = $app.UninstallSubkey
-            Execute-MSI -Action Uninstall -Path $productCode `
-                        -Parameters '/quiet /norestart REBOOT=ReallySuppress'
-        }} ElseIf ($app.QuietUninstallString) {{
-            ## EXE quiet uninstall string provided
-            $exePath   = ($app.QuietUninstallString -split '"')[1]
-            $exeParams = ($app.QuietUninstallString -split '"',3)[2].Trim()
-            Execute-Process -Path $exePath -Parameters $exeParams `
-                            -WindowStyle Hidden -ErrorAction SilentlyContinue
-        }} ElseIf ($app.UninstallString) {{
-            ## Attempt silent flag on raw uninstall string
-            $exePath = ($app.UninstallString -split '"')[1]
-            Execute-Process -Path $exePath -Parameters '/S /silent /quiet' `
-                            -WindowStyle Hidden -ErrorAction SilentlyContinue
-        }}
-    }}"""
+        # EXE/MSIX: re-run installer as repair
+        return _build_install_block(spec, installer_fn)
 
 
 # ---------------------------------------------------------------------------
 # WSB config generator (Windows Sandbox)
 # ---------------------------------------------------------------------------
-def generate_wsb_config(package_dir: str, script_name: str = "Deploy-Application.ps1") -> str:
-    """Generate a .wsb file to test the package inside Windows Sandbox."""
+def generate_wsb_config(package_dir: str, script_name: str = "Invoke-AppDeployToolkit.ps1") -> str:
     pkg_path = Path(package_dir)
     wsb = f"""<Configuration>
   <MappedFolders>

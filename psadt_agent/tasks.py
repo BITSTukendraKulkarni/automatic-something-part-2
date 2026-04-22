@@ -24,40 +24,17 @@ def make_research_task(
     app_version: str,
 ) -> Task:
     return Task(
-        description=f"""
-You are given an installer at path: {installer_path}
-Application name hint: "{app_name}"
-Application version hint: "{app_version}"
-
-Your deliverables:
-1. Call get_installer_metadata to extract: installer type (EXE/MSI/MSIX), product name,
-   product version, vendor/manufacturer, and any available product code (MSI GUID).
-2. Call search_silent_switches to determine the definitive silent installation switches.
-   - For MSI: use /quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress
-   - For EXE: identify the installer framework from metadata and provide the correct switch.
-   - For MSIX: explain the Add-AppxPackage/Add-AppxProvisionedPackage approach.
-3. Call analyze_dependencies to identify required prerequisites (e.g., .NET, VCRedist).
-   For each dependency: state the name, version, download URL (if known), and whether
-   it should be bundled in the PSADT Files folder.
-
-Output a single JSON object with these keys:
-{{
-  "app_name": "...",
-  "app_version": "...",
-  "app_vendor": "...",
-  "installer_type": "EXE|MSI|MSIX",
-  "silent_switches": "...",
-  "product_code": "{{GUID}}" or null,
-  "architecture": "x64|x86|ARM64",
-  "dependencies": [
-    {{"name": "...", "version": "...", "url": "...", "bundle": true|false}}
-  ],
-  "notes": "..."
-}}
-""",
+        description=(
+            f"Installer: {installer_path} | App: {app_name} {app_version}\n"
+            "1. Call get_installer_metadata (type, name, version, vendor, product_code).\n"
+            "2. Call search_silent_switches for the correct silent flags.\n"
+            "3. Call analyze_dependencies for prerequisites.\n"
+            "Output compact JSON: app_name, app_version, app_vendor, installer_type, "
+            "silent_switches, product_code, architecture, dependencies[], notes."
+        ),
         expected_output=(
-            "A JSON object with app_name, app_version, app_vendor, installer_type, "
-            "silent_switches, product_code, architecture, dependencies list, and notes."
+            "Compact JSON with app_name, app_version, app_vendor, installer_type, "
+            "silent_switches, product_code, architecture, dependencies, notes."
         ),
         agent=agent,
     )
@@ -74,42 +51,21 @@ def make_architecture_task(
     installer_path: str,
 ) -> Task:
     return Task(
-        description=f"""
-Research output from the Researcher agent:
-{research_output}
-
-PSADT template path: {template_path}
-Installer path: {installer_path}
-
-Your deliverables:
-1. Call read_psadt_template on the template path to:
-   - Confirm the PSADT version (critical — the Scripter must use version-correct cmdlets)
-   - List available toolkit functions
-   - Validate that AppDeployToolkitMain.ps1 exists
-2. Call get_package_history with the app_name from research output to:
-   - Check if this app has been packaged before
-   - Report the previous version if upgrading (version delta)
-   - Note any previously used switches or known issues from history
-3. Parse the research JSON and build a PackageSpec JSON for the Scripter.
-   The PackageSpec must include all fields needed to call build_folder_structure.
-4. Call build_folder_structure with the PackageSpec JSON and template_path.
-   This creates the package directory on disk.
-
-Output a single JSON object:
-{{
-  "psadt_version": "...",
-  "available_functions": ["Execute-MSI", "Execute-Process", ...],
-  "history_summary": "First package for this app" or "Upgrading from v1.x to v2.x",
-  "package_dir": "C:\\\\path\\\\to\\\\built\\\\package",
-  "spec_json": {{...complete PackageSpec as JSON object...}}
-}}
-""",
+        description=(
+            f"Research: {research_output}\n"
+            f"Template: {template_path} | Installer: {installer_path}\n"
+            "1. Call read_psadt_template (confirm version, available functions).\n"
+            "2. Call get_package_history for app_name from research.\n"
+            "3. Call build_folder_structure passing spec_json as a plain JSON object (NOT a pre-encoded string).\n"
+            "   Example: spec_json = {\"app_name\": \"...\", \"installer_path\": \"...\", ...}\n"
+            "Output compact JSON: psadt_version, available_functions[], history_summary, "
+            "package_dir, spec_json."
+        ),
         expected_output=(
-            "A JSON object with psadt_version, available_functions, history_summary, "
-            "package_dir path, and the full spec_json for the Scripter."
+            "Compact JSON with psadt_version, available_functions, history_summary, "
+            "package_dir, and spec_json."
         ),
         agent=agent,
-        context=[],  # will be set by crew
     )
 
 
@@ -122,43 +78,20 @@ def make_scripting_task(
     architecture_output: str,  # JSON string from Phase 2
 ) -> Task:
     return Task(
-        description=f"""
-Architecture output from the Architect agent:
-{architecture_output}
-
-Your deliverables:
-1. Read the spec_json from the architecture output.
-2. Call read_psadt_template one more time to internalize the exact available functions
-   for the detected PSADT version. DO NOT use cmdlets that don't exist in that version.
-3. Call generate_deploy_script with the spec_json.
-   The generated Deploy-Application.ps1 MUST:
-   a. Import AppDeployToolkitMain.ps1 correctly
-   b. Implement THREE phases: Pre-Installation, Installation, Post-Installation
-   c. In Pre-Installation: detect and silently remove ALL existing versions of the app
-      using Get-InstalledApplication (PSADT built-in) — version-agnostic cleanup
-   d. In Installation: use the correct cmdlet for the installer type:
-      - MSI → Execute-MSI -Action Install with ALLUSERS=1 REBOOT=ReallySuppress
-      - EXE → Execute-Process with the correct silent switches
-      - MSIX → Execute-Process calling PowerShell Add-AppxProvisionedPackage
-   e. Set $global:AllowRebootPassThru = $false
-   f. Use -DeployMode Silent / NonInteractive — NO interactive dialogs
-   g. Use Show-InstallationProgress for silent status (no user prompts)
-   h. Handle exit code 3010 (soft reboot required) gracefully — log it, do not reboot
-4. Verify the script was written to the package_dir.
-
-Output:
-{{
-  "script_path": "C:\\\\path\\\\to\\\\Deploy-Application.ps1",
-  "package_dir": "...",
-  "installer_type": "MSI|EXE|MSIX",
-  "silent_switches_used": "...",
-  "cleanup_strategy": "description of how previous versions are removed",
-  "script_preview": "first 300 chars of generated script..."
-}}
-""",
+        description=(
+            f"Architecture: {architecture_output}\n"
+            "1. Extract spec_json from the architecture output above.\n"
+            "2. Call generate_deploy_script passing spec_json as a plain JSON object (NOT a pre-encoded string).\n"
+            "   Example: spec_json = {\"app_name\": \"...\", \"app_version\": \"...\", ...}\n"
+            "Script must: use PSADT v4 cmdlets (Start-ADTMsiProcess/Start-ADTProcess/Get-ADTApplication), "
+            "implement Install-ADTDeployment/Uninstall-ADTDeployment/Repair-ADTDeployment functions, "
+            "silently remove prior versions via Get-ADTApplication, no reboots, no interactive dialogs.\n"
+            "Output compact JSON: script_path, package_dir, installer_type, silent_switches_used, "
+            "cleanup_strategy, script_preview (first 200 chars)."
+        ),
         expected_output=(
-            "A JSON object with script_path, package_dir, installer_type, "
-            "silent_switches_used, cleanup_strategy, and script_preview."
+            "Compact JSON with script_path, package_dir, installer_type, "
+            "silent_switches_used, cleanup_strategy, script_preview."
         ),
         agent=agent,
     )
@@ -174,73 +107,34 @@ def make_qa_task(
     research_output: str,    # JSON string from Phase 1 (for app name / product code)
     test_mode: str = "host",
 ) -> Task:
+    # Pass only the essential fields to keep context small
+    try:
+        import json as _json
+        s = _json.loads(scripting_output)
+        script_ctx = _json.dumps({k: s[k] for k in ("package_dir", "script_path", "installer_type") if k in s})
+        r = _json.loads(research_output)
+        research_ctx = _json.dumps({k: r[k] for k in ("app_name", "product_code") if k in r})
+    except Exception:
+        script_ctx = scripting_output
+        research_ctx = research_output
+
     return Task(
-        description=f"""
-Scripting output from the Scripter agent:
-{scripting_output}
-
-Research output (for app metadata):
-{research_output}
-
-Test mode: {test_mode}
-
-Your deliverables:
-1. Execute the install test:
-   - Call execute_install_test with package_dir and deployment_type="Install" and test_mode="{test_mode}"
-   - Record the exit code and map it to its meaning using your knowledge of MSI exit codes.
-   - Exit code 0 = success, 3010 = success with pending reboot (acceptable), anything else = FAILURE.
-
-2. Parse the install logs:
-   - Call parse_psadt_logs with the app_name from research output.
-   - Look for error lines, exit codes in the log, and the final status marker.
-   - If any error lines contain "1603", "1618", or "0x8", flag them explicitly.
-
-3. Validate installation via THREE methods:
-   a. Registry: Call verify_registry_installation with the app_name fragment.
-   b. WMI: Call verify_wmi_installation with the app_name fragment.
-   c. File: If an install_location is known from research, call verify_file_exists
-      on the main executable path.
-   Report pass/fail for each validation method.
-
-4. Post-test cleanup (MANDATORY if install succeeded):
-   - Call cleanup_test_installation with app_name and product_code (if MSI).
-   - Verify the app is fully removed after cleanup.
-   - If cleanup fails, report it explicitly — DO NOT leave partial installations.
-
-5. Produce a DETAILED test report. The report must:
-   - State overall PASS or FAIL
-   - For failures: pinpoint EXACTLY where in the chain the failure occurred
-     (e.g., "Installer returned exit code 1603 during Installation phase — likely missing VCRedist dependency")
-   - For successes: confirm all three validation methods passed and cleanup completed
-
-Output JSON:
-{{
-  "overall_result": "PASS|FAIL",
-  "install_exit_code": 0,
-  "exit_code_meaning": "...",
-  "log_analysis": {{
-    "final_status": "SUCCESS|FAILURE",
-    "error_lines": [...],
-    "exit_codes_found": [...]
-  }},
-  "validation": {{
-    "registry": {{"pass": true, "details": "..."}},
-    "wmi": {{"pass": true, "details": "..."}},
-    "file": {{"pass": true, "details": "..."}}
-  }},
-  "cleanup": {{
-    "completed": true,
-    "cleanup_exit_code": 0,
-    "still_installed": false
-  }},
-  "failure_diagnosis": null,
-  "recommendations": []
-}}
-""",
+        description=(
+            f"Script: {script_ctx} | Research: {research_ctx} | Mode: {test_mode}\n"
+            f"1. Call execute_install_test (package_dir, deployment_type=Install, test_mode={test_mode}).\n"
+            "2. Call parse_psadt_logs with app_name.\n"
+            "3. Call verify_wmi_installation with app_name — it checks Win32_Product, Get-Package, "
+            "AND registry; an EXE/NSIS install will show 'source: registry' or 'source: Get-Package' "
+            "instead of 'source: Win32_Product' — this is NORMAL and still counts as PASS.\n"
+            "4. Mark overall_result PASS if: exit_code is 0 or 3010 AND "
+            "verify_wmi_installation shows installed=true (any source).\n"
+            "5. If overall_result is PASS, call cleanup_test_installation.\n"
+            "Output compact JSON: overall_result, install_exit_code, exit_code_meaning, "
+            "log_analysis, validation (source + installed), cleanup, failure_diagnosis."
+        ),
         expected_output=(
-            "A detailed JSON test report with overall_result (PASS/FAIL), "
-            "exit code analysis, three-method validation results, cleanup confirmation, "
-            "and precise failure diagnosis if applicable."
+            "Compact JSON with overall_result (PASS/FAIL), install_exit_code, "
+            "log_analysis, validation, cleanup, failure_diagnosis."
         ),
         agent=agent,
     )

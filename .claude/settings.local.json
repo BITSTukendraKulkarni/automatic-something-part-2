@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(venv/Scripts/python -c \"import litellm; print\\(litellm.__version__\\)\")",
+      "Read(//c/Users/Skynet/Desktop/**)"
     ]
   }
 }
