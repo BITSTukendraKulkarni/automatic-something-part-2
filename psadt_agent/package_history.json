@@ -181,6 +181,74 @@
       },
       "cleanup_completed": false,
       "timestamp": "2026-04-22T09:47:05.194775"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "23.01",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_23.01_20260425_111253",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_23.01_20260425_111253\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1603,
+      "validation": {
+        "source": "none",
+        "installed": false
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-25T11:14:47.427445"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "23.01",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_23.01_20260425_112040",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_23.01_20260425_112040\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1,
+      "validation": {
+        "source": "all_checked",
+        "installed": false
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-25T11:22:33.134544"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "23.01",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_23.01_20260425_153215",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_23.01_20260425_153215\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1,
+      "validation": {
+        "source": "none",
+        "installed": false
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-25T15:34:54.720780"
+    },
+    {
+      "app_name": "7-Zip",
+      "app_version": "26.00",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\7-Zip_26.00_20260425_162520",
+      "script_path": "C:\\Temp\\Packages\\7-Zip_26.00_20260425_162520\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "PASS",
+      "qa_exit_code": null,
+      "validation": {
+        "source": "Win32_Product",
+        "installed": true
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-25T16:29:33.646422"
     }
   ],
   "VLC": [
@@ -217,6 +285,40 @@
       },
       "cleanup_completed": false,
       "timestamp": "2026-04-22T11:45:16.239970"
+    },
+    {
+      "app_name": "VLC",
+      "app_version": "3.0.23",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\VLC_3.0.23_20260424_114554",
+      "script_path": "C:\\Temp\\Packages\\VLC_3.0.23_20260424_114554\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1603,
+      "validation": {
+        "source": "NONE",
+        "installed": false
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-24T11:48:00.910169"
+    },
+    {
+      "app_name": "VLC",
+      "app_version": "3.0.23",
+      "installer_type": "MSI",
+      "silent_switches": "/quiet /norestart ALLUSERS=1 REBOOT=ReallySuppress",
+      "package_dir": "C:\\Temp\\Packages\\VLC_3.0.23_20260424_115852",
+      "script_path": "C:\\Temp\\Packages\\VLC_3.0.23_20260424_115852\\Invoke-AppDeployToolkit.ps1",
+      "psadt_version": "4.1.8",
+      "qa_result": "FAIL",
+      "qa_exit_code": 1603,
+      "validation": {
+        "source": "all_checked",
+        "installed": false
+      },
+      "cleanup_completed": false,
+      "timestamp": "2026-04-24T12:00:24.901955"
     }
   ]
 }

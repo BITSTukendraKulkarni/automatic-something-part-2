@@ -25,6 +25,7 @@ from utils import (
     list_all_packaged_apps,
     explain_exit_code,
     get_logger,
+    read_previous_package,
 )
 from config import (
     PSADT_TEMPLATE_PATH,
@@ -164,6 +165,7 @@ def start_workflow(
     app_version: str,
     template_path: str,
     test_mode: str,
+    previous_package_path: str = "",
 ) -> str:
     """Start the CrewAI workflow. Returns a status message."""
     if not installer_path.strip():
@@ -174,6 +176,22 @@ def start_workflow(
         return f"❌ Installer not found: {installer_path}"
     if not Path(template_path).exists():
         return f"❌ PSADT template not found: {template_path}"
+    if previous_package_path.strip():
+        prev_p = previous_package_path.strip()
+        if not Path(prev_p).exists():
+            return f"❌ Previous package path not found: {prev_p}"
+        if not Path(prev_p).is_dir():
+            return f"❌ Previous package path is not a directory: {prev_p}"
+        prev_ref = read_previous_package(prev_p)
+        fatal = [e for e in prev_ref.get("errors", []) if "not found" in e.lower() or "not a directory" in e.lower()]
+        if not prev_ref.get("script_content") and not prev_ref.get("installer_filename"):
+            return (
+                f"❌ Previous package at '{prev_p}' is missing both an installer (Files\\) "
+                "and a deploy script (Invoke-AppDeployToolkit.ps1). "
+                "Ensure this is a valid PSADT package directory."
+            )
+        if fatal:
+            return "❌ Previous package validation error: " + "; ".join(fatal)
 
     msg = runner.start(
         installer_path=installer_path.strip(),
@@ -181,8 +199,37 @@ def start_workflow(
         app_version=app_version.strip() or "1.0",
         template_path=template_path.strip(),
         test_mode=test_mode,
+        previous_package_path=previous_package_path.strip(),
     )
     return f"🚀 {msg}"
+
+
+def preview_previous_package(previous_package_path: str) -> str:
+    """Read a previous package dir and return a formatted summary for display."""
+    p = previous_package_path.strip()
+    if not p:
+        return "_Enter a previous package path above and click Preview._"
+    if not Path(p).exists():
+        return f"❌ Path not found: {p}"
+    ref = read_previous_package(p)
+    lines = [
+        f"**Package dir:** `{ref['package_dir']}`",
+        f"**Installer type:** `{ref['installer_type'] or '(unknown)'}`",
+        f"**Installer file:** `{ref['installer_filename'] or '(not found)'}`",
+        f"**Silent switches:** `{ref['silent_switches'] or '(not extracted)'}`",
+        f"**Product code:** `{ref['uninstall_product_code'] or '(none)'}`",
+    ]
+    if ref["files_installed"]:
+        shown = ref["files_installed"][:15]
+        lines.append("**Files in Files\\\\:** " + ", ".join(f"`{f}`" for f in shown)
+                     + (" …" if len(ref["files_installed"]) > 15 else ""))
+    if ref["pre_install_commands"]:
+        lines.append("**Pre-install:** " + " | ".join(f"`{c}`" for c in ref["pre_install_commands"]))
+    if ref["post_install_commands"]:
+        lines.append("**Post-install:** " + " | ".join(f"`{c}`" for c in ref["post_install_commands"]))
+    if ref["errors"]:
+        lines.append("⚠️ **Warnings:** " + "; ".join(ref["errors"]))
+    return "\n\n".join(lines)
 
 
 def stop_workflow() -> str:
@@ -366,6 +413,24 @@ Powered by **CrewAI** · **Groq LLM** · **FastMCP** · **PSADT**
                             info="'host' tests on this machine. 'sandbox' uses Windows Sandbox (requires feature enabled).",
                         )
 
+                        gr.Markdown("---")
+                        previous_package_input = gr.Textbox(
+                            label="Previous Package Path (optional — for upgrades)",
+                            placeholder=r"C:\Temp\Packages\GoogleChrome_124.0_20250101_120000",
+                            info=(
+                                "Path to a previously built PSADT package directory. "
+                                "When provided, the tool reads the previous silent switches, "
+                                "installed files, and script structure and uses them as the "
+                                "baseline for the new package to ensure upgrade consistency."
+                            ),
+                        )
+                        with gr.Row():
+                            preview_prev_btn = gr.Button("🔍 Preview Reference", variant="secondary", size="sm")
+                        prev_pkg_preview = gr.Markdown(
+                            value="_Enter a previous package path above and click Preview._",
+                            label="Previous Package Summary",
+                        )
+
                     with gr.Column(scale=1):
                         gr.Markdown(
                             """
@@ -397,9 +462,17 @@ Go to the **Approvals** tab to approve each gate.
                     inputs=[installer_input],
                     outputs=[installer_meta_out],
                 )
+                preview_prev_btn.click(
+                    fn=preview_previous_package,
+                    inputs=[previous_package_input],
+                    outputs=[prev_pkg_preview],
+                )
                 start_btn.click(
                     fn=start_workflow,
-                    inputs=[installer_input, app_name_input, app_version_input, template_input, test_mode_input],
+                    inputs=[
+                        installer_input, app_name_input, app_version_input,
+                        template_input, test_mode_input, previous_package_input,
+                    ],
                     outputs=[workflow_status],
                 )
                 stop_btn.click(fn=stop_workflow, outputs=[workflow_status])

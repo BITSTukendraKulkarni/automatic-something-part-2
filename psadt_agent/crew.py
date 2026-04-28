@@ -30,12 +30,57 @@ from utils import (
     get_logger,
     sanitize_app_name,
     timestamp_slug,
+    read_previous_package,
 )
 from config import HITL_ENABLED, TEST_MODE, PSADT_TEMPLATE_PATH
 from psadt_template import PackageSpec
 from terminal_prompt import ask_terminal_permission
+from verbose_logger import VerboseLogger, attach_logging_bridge
 
 log = get_logger("psadt-crew")
+
+
+# ---------------------------------------------------------------------------
+# Previous-package reference formatter
+# ---------------------------------------------------------------------------
+
+def _format_prev_ref(ref: dict) -> str:
+    """
+    Produce a compact, human-readable summary block from read_previous_package()
+    output that can be embedded verbatim into a task description prompt.
+    """
+    if not ref or not ref.get("package_dir"):
+        return ""
+
+    lines = [
+        "=== PREVIOUS PACKAGE REFERENCE ===",
+        f"Package dir      : {ref['package_dir']}",
+        f"Installer type   : {ref['installer_type'] or '(unknown)'}",
+        f"Installer file   : {ref['installer_filename'] or '(not found)'}",
+        f"Silent switches  : {ref['silent_switches'] or '(not extracted)'}",
+        f"Product code     : {ref['uninstall_product_code'] or '(none)'}",
+    ]
+
+    if ref["files_installed"]:
+        lines.append(f"Files in Files\\  : {', '.join(ref['files_installed'][:20])}"
+                     + (" …" if len(ref["files_installed"]) > 20 else ""))
+
+    if ref["pre_install_commands"]:
+        lines.append("Pre-install cmds : " + " | ".join(ref["pre_install_commands"]))
+
+    if ref["post_install_commands"]:
+        lines.append("Post-install cmds: " + " | ".join(ref["post_install_commands"]))
+
+    if ref["script_content"]:
+        # Embed a condensed version of the prior script so the Scripter can mirror its structure
+        preview = ref["script_content"][:1500].replace("\r\n", "\n")
+        lines += ["", "--- Previous script (first 1500 chars) ---", preview, "---"]
+
+    if ref.get("errors"):
+        lines.append("Warnings: " + "; ".join(ref["errors"]))
+
+    lines.append("=== END PREVIOUS PACKAGE REFERENCE ===")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +108,7 @@ class PSADTCrew:
         template_path: str = PSADT_TEMPLATE_PATH,
         test_mode: str = TEST_MODE,
         progress_callback: Optional[ProgressCallback] = None,
+        previous_package_path: str = "",
     ):
         self.installer_path = installer_path
         self.app_name = app_name
@@ -70,6 +116,13 @@ class PSADTCrew:
         self.template_path = template_path
         self.test_mode = test_mode
         self.progress_callback = progress_callback or (lambda phase, status, data: None)
+
+        # Read and store the previous package reference (may be empty)
+        self._prev_ref: dict = {}
+        self._prev_context_block: str = ""
+        if previous_package_path and previous_package_path.strip():
+            self._prev_ref = read_previous_package(previous_package_path.strip())
+            self._prev_context_block = _format_prev_ref(self._prev_ref)
 
         # Phase outputs (populated as workflow runs)
         self.research_output: Optional[str] = None
@@ -82,11 +135,32 @@ class PSADTCrew:
         self._current_phase = "idle"
         self._phase_results: dict = {}
 
+        # Create a verbose task log for this run
+        task_label = f"{sanitize_app_name(app_name)}_{app_version}_{timestamp_slug()}"
+        self._vlog = VerboseLogger.for_task(task_label)
+        # Mirror all Python logging records into the task log
+        attach_logging_bridge()
+        self._vlog.action(
+            "PSADTCrew initialised",
+            installer_path=installer_path,
+            app_name=app_name,
+            app_version=app_version,
+            template_path=template_path,
+            test_mode=test_mode,
+            hitl_enabled=HITL_ENABLED,
+            previous_package_path=previous_package_path or "(none)",
+            prev_ref_loaded=bool(self._prev_ref),
+            prev_ref_errors=self._prev_ref.get("errors") if self._prev_ref else [],
+        )
+        log.info(f"Verbose task log: {self._vlog.log_path}")
+
         # Build agents once
+        self._vlog.action("Building agents (Researcher, Architect, Scripter, QA Tester)")
         self.researcher  = make_researcher()
         self.architect   = make_architect()
         self.scripter    = make_scripter()
         self.qa_tester   = make_qa_tester()
+        self._vlog.action("All agents built successfully")
 
     # ------------------------------------------------------------------
     # Public API
@@ -99,63 +173,96 @@ class PSADTCrew:
         """
         log.info(f"=== PSADT Agentic AI — Starting workflow for '{self.app_name}' ===")
         log.info(f"HITL enabled: {HITL_ENABLED} | Test mode: {self.test_mode}")
+        self._vlog.section(f"WORKFLOW START — {self.app_name} {self.app_version}")
 
         try:
             # ---- Phase 1: Research ----------------------------------------
-            p1_desc = (f"Installer: {self.installer_path} | App: {self.app_name} {self.app_version}\n"
-                       "1. Call get_installer_metadata. 2. Call search_silent_switches. 3. Call analyze_dependencies.\n"
-                       "Output compact JSON: app_name, app_version, app_vendor, installer_type, silent_switches, architecture, dependencies, notes.")
+            p1_desc = (
+                f"Installer: {self.installer_path} | App: {self.app_name} {self.app_version}\n"
+                "1. Call get_installer_metadata. 2. Call search_silent_switches. 3. Call analyze_dependencies.\n"
+                + (
+                    f"IMPORTANT — previous package reference provided. "
+                    f"Use the switches and installer type below as your primary source; "
+                    f"only override if the new installer evidence clearly contradicts them.\n"
+                    f"{self._prev_context_block}\n"
+                    if self._prev_context_block else ""
+                )
+                + "Output compact JSON: app_name, app_version, app_vendor, installer_type, "
+                  "silent_switches, architecture, dependencies, notes."
+            )
+            self._vlog.action("HITL gate — Research", task_description=p1_desc)
             if not self._gate("Research", "Begin installer analysis and switch discovery?", task_description=p1_desc):
                 return self._aborted("Research")
 
             self._set_phase("Research")
             research_result = self._run_phase_1()
             self._phase_results["research"] = research_result
+            self._vlog.action("Phase 1 result captured", result_keys=list(research_result.keys()))
 
             # ---- Phase 2: Architecture ------------------------------------
             context_str = json.dumps(research_result)[:300]
             p2_desc = (f"Research: {context_str}\nTemplate: {self.template_path} | Installer: {self.installer_path}\n"
                        "1. Call read_psadt_template. 2. Call get_package_history. 3. Call build_folder_structure.\n"
                        "Output compact JSON: psadt_version, package_dir, spec_json.")
+            self._vlog.action("HITL gate — Architecture", task_description=p2_desc)
             if not self._gate("Architecture", f"Research complete. Proceed to build folder structure?", task_description=p2_desc):
                 return self._aborted("Architecture")
 
             self._set_phase("Architecture")
+            self._vlog.action("Sleeping 20 s before Architecture phase (rate-limit buffer)")
             time.sleep(20)
             arch_result = self._run_phase_2(research_result)
             self._phase_results["architecture"] = arch_result
+            self._vlog.action("Phase 2 result captured",
+                              package_dir=arch_result.get("package_dir"),
+                              psadt_version=arch_result.get("psadt_version"))
 
             # ---- Phase 3: Scripting ---------------------------------------
             p3_desc = (f"Package dir: {arch_result.get('package_dir','?')}\n"
                        "1. Extract spec_json. 2. Call generate_deploy_script.\n"
                        "Output compact JSON: script_path, package_dir, installer_type, silent_switches_used, script_preview.")
+            self._vlog.action("HITL gate — Scripting", task_description=p3_desc)
             if not self._gate("Scripting", f"Architecture complete. Package dir: {arch_result.get('package_dir','?')}", task_description=p3_desc):
                 return self._aborted("Scripting")
 
             self._set_phase("Scripting")
+            self._vlog.action("Sleeping 20 s before Scripting phase (rate-limit buffer)")
             time.sleep(20)
             script_result = self._run_phase_3(arch_result)
             self._phase_results["scripting"] = script_result
+            self._vlog.action("Phase 3 result captured",
+                              script_path=script_result.get("script_path"),
+                              installer_type=script_result.get("installer_type"))
 
             # ---- Phase 4: QA Testing --------------------------------------
             p4_desc = (f"Script: {script_result.get('script_path','?')} | Mode: {self.test_mode}\n"
                        "1. execute_install_test. 2. parse_psadt_logs. 3. verify_registry. 4. verify_wmi. 5. cleanup.\n"
                        "Output compact JSON: overall_result, install_exit_code, log_analysis, validation, cleanup.")
             script_preview = script_result.get("script_preview", "")[:200]
+            self._vlog.action("HITL gate — QA Testing", task_description=p4_desc)
             if not self._gate("QA Testing", f"Script at {script_result.get('script_path','?')}\n{script_preview}", task_description=p4_desc):
                 return self._aborted("QA Testing")
 
             self._set_phase("QA Testing")
+            self._vlog.action("Sleeping 20 s before QA Testing phase (rate-limit buffer)")
             time.sleep(20)
             qa_result = self._run_phase_4(script_result, research_result)
             self._phase_results["qa"] = qa_result
+            self._vlog.action("Phase 4 result captured",
+                              overall_result=qa_result.get("overall_result"),
+                              exit_code=qa_result.get("install_exit_code"))
 
             # ---- Finalization ---------------------------------------------
+            self._vlog.section("FINALIZATION")
             final = self._finalize(research_result, arch_result, script_result, qa_result)
+            self._vlog.action("Workflow complete", success=final.get("success"), overall=final.get("overall_result"))
+            self._vlog.close()
             return final
 
         except Exception as e:
             log.exception(f"Workflow crashed: {e}")
+            self._vlog.error(f"Workflow crashed in phase '{self._current_phase}': {e}")
+            self._vlog.close()
             return {"success": False, "error": str(e), "phase": self._current_phase}
 
     def stop(self):
@@ -167,14 +274,23 @@ class PSADTCrew:
     # ------------------------------------------------------------------
 
     def _run_phase_1(self) -> dict:
+        self._vlog.section("PHASE 1 — RESEARCH (Researcher Agent)")
         task = make_research_task(
             agent=self.researcher,
             installer_path=self.installer_path,
             app_name=self.app_name,
             app_version=self.app_version,
+            prev_context=self._prev_context_block,
         )
+        self._vlog.action("CrewAI kickoff — Research",
+                          agent="Researcher",
+                          installer=self.installer_path,
+                          app=f"{self.app_name} {self.app_version}")
         crew = Crew(agents=[self.researcher], tasks=[task], process=Process.sequential, verbose=True)
         raw_output = crew.kickoff()
+        self._vlog.action("CrewAI raw output received — Research",
+                          raw_type=type(raw_output).__name__,
+                          raw_preview=str(raw_output)[:300])
         result = self._parse_output(raw_output, "research")
         self.research_output = json.dumps(result)
         self._emit("Research", "completed", result)
@@ -182,19 +298,27 @@ class PSADTCrew:
         return result
 
     def _run_phase_2(self, research_result: dict) -> dict:
+        self._vlog.section("PHASE 2 — ARCHITECTURE (Architect Agent)")
         # Pass only the fields Architecture needs — avoids bloating the prompt
         arch_ctx = {k: research_result[k] for k in (
             "app_name", "app_version", "app_vendor",
             "installer_type", "silent_switches", "architecture",
         ) if k in research_result}
+        self._vlog.action("Architecture context built", context=json.dumps(arch_ctx))
         task = make_architecture_task(
             agent=self.architect,
             research_output=json.dumps(arch_ctx),
             template_path=self.template_path,
             installer_path=self.installer_path,
         )
+        self._vlog.action("CrewAI kickoff — Architecture",
+                          agent="Architect",
+                          template_path=self.template_path)
         crew = Crew(agents=[self.architect], tasks=[task], process=Process.sequential, verbose=True)
         raw_output = crew.kickoff()
+        self._vlog.action("CrewAI raw output received — Architecture",
+                          raw_type=type(raw_output).__name__,
+                          raw_preview=str(raw_output)[:300])
         result = self._parse_output(raw_output, "architecture")
         self.architecture_output = json.dumps(result)
         self._emit("Architecture", "completed", result)
@@ -202,15 +326,22 @@ class PSADTCrew:
         return result
 
     def _run_phase_3(self, arch_result: dict) -> dict:
+        self._vlog.section("PHASE 3 — SCRIPTING (Scripter Agent)")
         script_ctx = {k: arch_result[k] for k in (
             "psadt_version", "package_dir", "spec_json",
         ) if k in arch_result}
+        self._vlog.action("Scripting context built", context=json.dumps(script_ctx)[:400])
         task = make_scripting_task(
             agent=self.scripter,
             architecture_output=json.dumps(script_ctx),
+            prev_context=self._prev_context_block,
         )
+        self._vlog.action("CrewAI kickoff — Scripting", agent="Scripter")
         crew = Crew(agents=[self.scripter], tasks=[task], process=Process.sequential, verbose=True)
         raw_output = crew.kickoff()
+        self._vlog.action("CrewAI raw output received — Scripting",
+                          raw_type=type(raw_output).__name__,
+                          raw_preview=str(raw_output)[:300])
         result = self._parse_output(raw_output, "scripting")
         self.scripting_output = json.dumps(result)
         self._emit("Scripting", "completed", result)
@@ -218,18 +349,29 @@ class PSADTCrew:
         return result
 
     def _run_phase_4(self, script_result: dict, research_result: dict) -> dict:
+        self._vlog.section("PHASE 4 — QA TESTING (QA Tester Agent)")
+        qa_script_ctx = {k: script_result[k] for k in (
+            "package_dir", "script_path", "installer_type",
+        ) if k in script_result}
+        qa_research_ctx = {k: research_result[k] for k in (
+            "app_name", "product_code",
+        ) if k in research_result}
+        self._vlog.action("QA context built",
+                          script_ctx=json.dumps(qa_script_ctx),
+                          research_ctx=json.dumps(qa_research_ctx),
+                          test_mode=self.test_mode)
         task = make_qa_task(
             agent=self.qa_tester,
-            scripting_output=json.dumps({k: script_result[k] for k in (
-                "package_dir", "script_path", "installer_type",
-            ) if k in script_result}),
-            research_output=json.dumps({k: research_result[k] for k in (
-                "app_name", "product_code",
-            ) if k in research_result}),
+            scripting_output=json.dumps(qa_script_ctx),
+            research_output=json.dumps(qa_research_ctx),
             test_mode=self.test_mode,
         )
+        self._vlog.action("CrewAI kickoff — QA Testing", agent="QA Tester", test_mode=self.test_mode)
         crew = Crew(agents=[self.qa_tester], tasks=[task], process=Process.sequential, verbose=True)
         raw_output = crew.kickoff()
+        self._vlog.action("CrewAI raw output received — QA Testing",
+                          raw_type=type(raw_output).__name__,
+                          raw_preview=str(raw_output)[:300])
         result = self._parse_output(raw_output, "qa")
         self.qa_output = json.dumps(result)
         self._emit("QA Testing", "completed", result)
@@ -248,8 +390,10 @@ class PSADTCrew:
         """
         if self._stop_requested:
             log.info(f"[HITL] Stop requested before phase: {phase}")
+            self._vlog.action("HITL gate — stop flag set, skipping phase", phase=phase)
             return False
 
+        self._vlog.action("HITL gate — showing terminal prompt", phase=phase, context=context[:200])
         # Always show terminal prompt first
         terminal_approved = ask_terminal_permission(
             phase=phase,
@@ -258,11 +402,13 @@ class PSADTCrew:
         )
         if not terminal_approved:
             log.info(f"[HITL] Rejected at terminal prompt — phase: {phase}")
+            self._vlog.action("HITL gate — REJECTED at terminal prompt", phase=phase)
             return False
 
         # If HITL bypass, terminal approval is sufficient
         if not HITL_ENABLED:
             log.info(f"[HITL] Bypass mode — terminal-approved phase: {phase}")
+            self._vlog.action("HITL gate — APPROVED (bypass mode)", phase=phase)
             self._emit(phase, "hitl_bypassed", {"phase": phase, "context": context})
             return True
 
@@ -271,9 +417,12 @@ class PSADTCrew:
         token = token_info["token"]
         self._emit(phase, "hitl_pending", {"phase": phase, "context": context, "token": token})
         log.info(f"[HITL] Waiting for Gradio approval — phase={phase}, token={token}")
+        self._vlog.action("HITL gate — waiting for Gradio approval", phase=phase, token=token)
 
         approved = hitl_wait_for_approval(token, timeout=600.0)
         self._emit(phase, "hitl_decided", {"phase": phase, "token": token, "approved": approved})
+        self._vlog.action("HITL gate — Gradio decision received",
+                          phase=phase, token=token, approved=approved)
         return approved
 
     # ------------------------------------------------------------------
@@ -340,6 +489,7 @@ class PSADTCrew:
     def _set_phase(self, phase: str):
         self._current_phase = phase
         self._emit(phase, "started", {"phase": phase})
+        self._vlog.action("Entering phase", phase=phase)
         log.info(f">>> Entering phase: {phase}")
 
     def _emit(self, phase: str, status: str, data: dict):
@@ -351,6 +501,8 @@ class PSADTCrew:
     def _aborted(self, phase: str) -> dict:
         msg = f"Workflow aborted at phase: {phase} (HITL rejected or stop requested)"
         log.warning(msg)
+        self._vlog.warning(msg)
+        self._vlog.close()
         self._emit(phase, "aborted", {"phase": phase, "reason": msg})
         return {"success": False, "aborted": True, "phase": phase, "message": msg}
 
@@ -409,6 +561,7 @@ class PSADTCrewRunner:
         app_version: str,
         template_path: str,
         test_mode: str,
+        previous_package_path: str = "",
     ) -> str:
         if self.is_running:
             return "A workflow is already running."
@@ -428,6 +581,7 @@ class PSADTCrewRunner:
             template_path=template_path,
             test_mode=test_mode,
             progress_callback=_progress,
+            previous_package_path=previous_package_path,
         )
 
         def _run():

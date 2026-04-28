@@ -16,31 +16,54 @@ import litellm
 from crewai import Agent, LLM
 
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_MAX_TOKENS
+from verbose_logger import VerboseLogger
 
 # ---------------------------------------------------------------------------
-# Patch litellm.completion to auto-retry on RateLimitError.
-# litellm's built-in max_retries does NOT cover 429s — it only covers
-# network errors. This wrapper reads the "try again in Xs" from Groq's
-# error message and sleeps exactly that long before retrying.
+# Patch litellm.completion with two behaviours layered together:
+#   1. Auto-retry on RateLimitError (429), sleeping the exact wait Groq reports.
+#   2. Verbose logging — capture the exact messages list sent to the LLM and
+#      the full raw response returned, writing both to the active task log.
 # ---------------------------------------------------------------------------
 _original_completion = litellm.completion
 
 @functools.wraps(_original_completion)
-def _completion_with_rate_limit_retry(*args, **kwargs):
+def _completion_with_verbose_logging(*args, **kwargs):
     max_attempts = 8
+
+    # --- Capture prompt -------------------------------------------------------
+    messages = kwargs.get("messages") or (args[1] if len(args) > 1 else None)
+    model    = kwargs.get("model") or (args[0] if args else "?")
+    vlog     = VerboseLogger.get_current()
+    call_label = f"model={model}"
+    if vlog and messages:
+        vlog.llm_prompt(messages, call_label=call_label)
+
+    # --- Call with retry on 429 -----------------------------------------------
     for attempt in range(max_attempts):
         try:
-            return _original_completion(*args, **kwargs)
+            response = _original_completion(*args, **kwargs)
+
+            # --- Capture response ----------------------------------------------
+            if vlog:
+                vlog.llm_response(response, call_label=call_label)
+
+            return response
+
         except litellm.RateLimitError as e:
             if attempt == max_attempts - 1:
+                if vlog:
+                    vlog.error(f"RateLimitError — max retries exhausted: {e}")
                 raise
-            msg = str(e)
+            msg   = str(e)
             match = re.search(r"try again in ([0-9.]+)s", msg)
-            wait = float(match.group(1)) + 2.0 if match else 30.0
-            print(f"[rate-limit] 429 hit — sleeping {wait:.1f}s (attempt {attempt + 1}/{max_attempts})")
+            wait  = float(match.group(1)) + 2.0 if match else 30.0
+            notice = f"[rate-limit] 429 hit — sleeping {wait:.1f}s (attempt {attempt + 1}/{max_attempts})"
+            print(notice)
+            if vlog:
+                vlog.warning(notice)
             time.sleep(wait)
 
-litellm.completion = _completion_with_rate_limit_retry
+litellm.completion = _completion_with_verbose_logging
 from tools import (
     get_installer_metadata_tool,
     search_silent_switches_tool,
@@ -177,14 +200,44 @@ def make_qa_tester() -> Agent:
             "Parse C:\\Windows\\Logs\\Software for success/failure and exact exit codes. "
             "Validate installation via Registry, WMI, and Get-Package. "
             "If the test passes, automatically uninstall the app and verify clean removal. "
-            "Produce a detailed test report with pass/fail status and actionable failure diagnosis."
+            "Produce a detailed test report with pass/fail status and actionable failure diagnosis.\n\n"
+
+            "=== STRICT OUTPUT ACCURACY RULES ===\n"
+            "1. NEVER hallucinate or infer exit codes. Copy install_exit_code VERBATIM from the "
+            "execute_install_test tool output. If the tool returns exit_code: 1, report 1 — not 1603 "
+            "or any other value. If a field is missing from tool output, set it to null.\n"
+
+            "2. PASS/FAIL LOGIC: Mark PASS only if exit_code is 0 or 3010 AND "
+            "verify_wmi_installation returns installed: true (any source). "
+            "All other exit codes = FAIL, including exit_code 1.\n"
+
+            "3. ELEVATION ERRORS (exit_code 1): If stderr contains 'requires administrative permissions' "
+            "or 'not an Administrator' or 'PowerShell is not elevated', set failure_diagnosis to: "
+            "'Process launched without elevation. Re-run execute_install_test with an elevated/admin context. "
+            "In host mode, ensure the calling process is already running as Administrator or use -Verb RunAs.' "
+            "Do NOT classify this as exit_code 1603.\n"
+
+            "4. LOG PARSE FAILURES: If parse_psadt_logs returns a Permission Denied error, note it as: "
+            "'Log read failed — elevation required. Same root cause as install failure.' "
+            "Do not report overall_status SUCCESS if the log file could not be read.\n"
+
+            "5. FINAL JSON must use exactly this schema (no extra fields):\n"
+            "{ \"overall_result\": \"PASS\"|\"FAIL\", \"install_exit_code\": <integer verbatim>, "
+            "\"exit_code_meaning\": \"<string verbatim>\", \"log_analysis\": \"<what happened>\", "
+            "\"validation\": { \"source\": \"<Win32_Product|Get-Package|registry|all_checked|none>\", "
+            "\"installed\": <true|false> }, "
+            "\"cleanup\": \"<result string or null>\", "
+            "\"failure_diagnosis\": \"<root cause + exact remediation step>\" }"
         ),
         backstory=(
             "You are a meticulous QA engineer who has debugged thousands of failed deployments. "
             "You never rely on a single validation signal — you check the log, the registry, "
             "AND WMI to confirm an app is truly installed. You always clean up after a successful test. "
-            "Your reports are precise: you map every exit code to a human-readable explanation "
-            "and pinpoint exactly where in the deployment chain the failure occurred."
+            "Your reports are precise: you copy every exit code VERBATIM from tool output — you never "
+            "guess, infer, or substitute a different code. If the tool says exit_code 1, you report 1. "
+            "You know that exit_code 1 from a PSADT host-mode run almost always means the PowerShell "
+            "process was not elevated, not a fatal MSI error. You pinpoint the root cause and give "
+            "the exact remediation step, not a generic description."
         ),
         tools=[
             execute_install_test_tool,

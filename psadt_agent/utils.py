@@ -27,11 +27,17 @@ def get_logger(name: str) -> logging.Logger:
     ch.setLevel(logging.INFO)
     ch.setFormatter(fmt)
     logger.addHandler(ch)
-    # File handler
+    # File handler — persistent system.log
     fh = logging.FileHandler(LOGS_DIR / "system.log", encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     logger.addHandler(fh)
+    # Verbose task-log bridge — mirrors records into the active per-task log file
+    try:
+        from verbose_logger import attach_logging_bridge
+        attach_logging_bridge()
+    except Exception:
+        pass  # verbose_logger not yet importable at early startup
     return logger
 
 log = get_logger("psadt-utils")
@@ -252,3 +258,164 @@ def validate_package_path(pkg_dir: Path, output_base: Path) -> None:
 
 def timestamp_slug() -> str:
     return datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+
+# ---------------------------------------------------------------------------
+# Previous package reference reader
+# ---------------------------------------------------------------------------
+
+def read_previous_package(package_path: str) -> dict:
+    """
+    Read a previously built PSADT package directory and extract the information
+    that agents need to produce a consistent upgrade:
+
+    Returns a dict with:
+      - silent_switches        : str   — switches used in the prior build
+      - installer_type         : str   — EXE / MSI / MSIX
+      - installer_filename     : str   — original installer file name
+      - files_installed        : list  — names of every file under Files\
+      - script_content         : str   — full text of Invoke-AppDeployToolkit.ps1
+      - script_path            : str   — absolute path to that script
+      - pre_install_commands   : list  — extracted Pre-Install steps
+      - post_install_commands  : list  — extracted Post-Install steps
+      - uninstall_product_code : str   — GUID if found in script
+      - package_dir            : str   — resolved absolute path
+      - errors                 : list  — non-fatal issues encountered while reading
+    """
+    result: dict = {
+        "silent_switches": "",
+        "installer_type": "",
+        "installer_filename": "",
+        "files_installed": [],
+        "script_content": "",
+        "script_path": "",
+        "pre_install_commands": [],
+        "post_install_commands": [],
+        "uninstall_product_code": "",
+        "package_dir": "",
+        "errors": [],
+    }
+
+    pkg_dir = Path(package_path.strip())
+    if not pkg_dir.exists():
+        result["errors"].append(f"Package directory not found: {package_path}")
+        return result
+    if not pkg_dir.is_dir():
+        result["errors"].append(f"Path is not a directory: {package_path}")
+        return result
+
+    result["package_dir"] = str(pkg_dir.resolve())
+
+    # --- Files\ subfolder -------------------------------------------------
+    files_dir = pkg_dir / "Files"
+    if files_dir.exists():
+        result["files_installed"] = [
+            str(f.relative_to(files_dir))
+            for f in sorted(files_dir.rglob("*"))
+            if f.is_file()
+        ]
+        # Pick the first recognised installer as the reference filename
+        _INSTALLER_EXTS = {".exe", ".msi", ".msix", ".msp", ".msu", ".appx"}
+        for f in files_dir.iterdir():
+            if f.suffix.lower() in _INSTALLER_EXTS:
+                result["installer_filename"] = f.name
+                # Infer installer type from extension
+                ext_map = {".msi": "MSI", ".msix": "MSIX", ".appx": "MSIX",
+                           ".exe": "EXE", ".msp": "MSP", ".msu": "MSU"}
+                result["installer_type"] = ext_map.get(f.suffix.lower(), "EXE")
+                break
+    else:
+        result["errors"].append("Files\\ subfolder not found in previous package")
+
+    # --- Invoke-AppDeployToolkit.ps1 --------------------------------------
+    script_candidates = [
+        pkg_dir / "Invoke-AppDeployToolkit.ps1",
+        pkg_dir / "Deploy-Application.ps1",
+    ]
+    script_path = next((p for p in script_candidates if p.exists()), None)
+    if script_path:
+        try:
+            script_text = script_path.read_text(encoding="utf-8", errors="replace")
+            result["script_content"] = script_text
+            result["script_path"] = str(script_path)
+            _extract_script_details(script_text, result)
+        except Exception as e:
+            result["errors"].append(f"Could not read script: {e}")
+    else:
+        result["errors"].append("No Invoke-AppDeployToolkit.ps1 or Deploy-Application.ps1 found")
+
+    return result
+
+
+def _extract_script_details(script_text: str, result: dict) -> None:
+    """
+    Parse an Invoke-AppDeployToolkit.ps1 and populate silent_switches,
+    installer_type (if not yet set), uninstall_product_code, and
+    pre/post install command lists in-place on `result`.
+    """
+    # Silent switches — prefer Start-ADTMsiProcess (install block) over Start-ADTProcess
+    # so we don't accidentally pick up a pre-install helper command's args instead.
+    sw_match = re.search(
+        r'Start-ADTMsiProcess\s.*?-ArgumentList\s+[\'"]([^\'"]+)[\'"]',
+        script_text, re.IGNORECASE
+    )
+    if not sw_match:
+        # Fall back: find a Start-ADTProcess that is inside the "## MARK: Install" block
+        install_block = re.search(
+            r'##\s*MARK:\s*Install\b(.*?)##\s*MARK:\s*Post-Install',
+            script_text, re.DOTALL | re.IGNORECASE
+        )
+        search_scope = install_block.group(1) if install_block else script_text
+        sw_match = re.search(
+            r'Start-ADTProcess\s.*?-ArgumentList\s+[\'"]([^\'"]+)[\'"]',
+            search_scope, re.IGNORECASE
+        )
+    if sw_match:
+        raw = sw_match.group(1)
+        # Strip PSADT-specific trailing flags that aren't really "switches"
+        cleaned = re.sub(r'\s+ALLUSERS=1\s*', ' ', raw)
+        cleaned = re.sub(r'\s+REBOOT=ReallySuppress\s*', ' ', cleaned).strip()
+        result["silent_switches"] = cleaned
+
+    # Installer type from Start-ADTMsiProcess → MSI, Add-AppxProvisioned → MSIX, else EXE
+    if not result["installer_type"]:
+        if re.search(r'Start-ADTMsiProcess', script_text, re.IGNORECASE):
+            result["installer_type"] = "MSI"
+        elif re.search(r'Add-Appx(?:Provisioned)?Package', script_text, re.IGNORECASE):
+            result["installer_type"] = "MSIX"
+        else:
+            result["installer_type"] = "EXE"
+
+    # Product code / GUID — look for msiexec /x or Uninstall-ADTApplication with GUID
+    guid_match = re.search(
+        r'\{[0-9A-Fa-f\-]{36}\}',
+        script_text
+    )
+    if guid_match:
+        result["uninstall_product_code"] = guid_match.group(0)
+
+    # Pre-install commands (lines between "## MARK: Pre-Install" and "## MARK: Install")
+    pre_block = re.search(
+        r'##\s*MARK:\s*Pre-Install.*?##\s*MARK:\s*Install',
+        script_text, re.DOTALL | re.IGNORECASE
+    )
+    if pre_block:
+        cmds = re.findall(
+            r'Start-ADTProcess\s+-FilePath\s+[\'"]([^\'"]+)[\'"]'
+            r'\s+-ArgumentList\s+[\'"]([^\'"]+)[\'"]',
+            pre_block.group(0), re.IGNORECASE
+        )
+        result["pre_install_commands"] = [f"{exe} {args}" for exe, args in cmds]
+
+    # Post-install commands (lines between "## MARK: Post-Install" and next ## MARK or end)
+    post_block = re.search(
+        r'##\s*MARK:\s*Post-Install(.*?)(?:##\s*MARK:|\Z)',
+        script_text, re.DOTALL | re.IGNORECASE
+    )
+    if post_block:
+        cmds = re.findall(
+            r'Start-ADTProcess\s+-FilePath\s+[\'"]([^\'"]+)[\'"]'
+            r'\s+-ArgumentList\s+[\'"]([^\'"]+)[\'"]',
+            post_block.group(1), re.IGNORECASE
+        )
+        result["post_install_commands"] = [f"{exe} {args}" for exe, args in cmds]
